@@ -1,0 +1,108 @@
+# NAS deployment: four application containers with externally managed MySQL and Redis.
+# Copy .env.nas.example to .env and set real values before starting.
+name: xianyu-auto-reply
+
+services:
+  backend-web:
+    image: ghcr.io/${GHCR_OWNER}/xianyu-backend-web:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      ENVIRONMENT: production
+      HOST: 0.0.0.0
+      BACKEND_WEB_PORT: 8089
+      JWT_ALGORITHM: HS256
+      WEBSOCKET_SERVICE_URL: http://websocket:8090
+      SCHEDULER_SERVICE_URL: http://scheduler:8091
+      STATIC_DIR: /app/static
+      BACKUP_DIR: /app/backups
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    volumes:
+      - ./data/logs/backend-web:/app/backend-web/logs
+      - ./data/static:/app/static
+      - ./data/backups:/app/backups
+    networks: [xianyu]
+    shm_size: 1gb
+    healthcheck:
+      test: [CMD, curl, -f, http://localhost:8089/health]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 90s
+
+  websocket:
+    image: ghcr.io/${GHCR_OWNER}/xianyu-websocket:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      ENVIRONMENT: production
+      HOST: 0.0.0.0
+      WEBSOCKET_PORT: 8090
+      BACKEND_WEB_SERVICE_URL: http://backend-web:8089
+      STATIC_DIR: /app/static
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    volumes:
+      - ./data/logs/websocket:/app/websocket/logs
+      - ./data/static:/app/static
+      - ./data/browser-data:/app/browser_data
+    networks: [xianyu]
+    shm_size: 1gb
+    depends_on:
+      backend-web:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, curl, -f, http://localhost:8090/health]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 90s
+
+  scheduler:
+    image: ghcr.io/${GHCR_OWNER}/xianyu-scheduler:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      ENVIRONMENT: production
+      HOST: 0.0.0.0
+      SCHEDULER_PORT: 8091
+      BACKEND_WEB_SERVICE_URL: http://backend-web:8089
+      WEBSOCKET_SERVICE_URL: http://websocket:8090
+      STATIC_DIR: /app/static
+      BACKUP_DIR: /app/backups
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    volumes:
+      - ./data/logs/scheduler:/app/scheduler/logs
+      - ./data/static:/app/static:ro
+      - ./data/backups:/app/backups
+    networks: [xianyu]
+    depends_on:
+      backend-web:
+        condition: service_healthy
+      websocket:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, curl, -f, http://localhost:8091/health]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 90s
+
+  frontend:
+    image: ghcr.io/${GHCR_OWNER}/xianyu-frontend:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+    ports:
+      - ${FRONTEND_PORT:-9000}:80
+    networks: [xianyu]
+    depends_on:
+      backend-web:
+        condition: service_healthy
+
+networks:
+  xianyu:
+    driver: bridge
