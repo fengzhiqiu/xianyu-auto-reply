@@ -509,3 +509,79 @@ export const getTodayStats = async (): Promise<{ success: boolean; data?: TodayS
     return { success: false }
   }
 }
+
+// ========== 人工滑块验证（2A，仅管理员） ==========
+
+export interface ManualCaptchaPendingItem {
+  id: number
+  account_id: string
+  account_pk: number | null
+  display_name: string
+  remark: string
+  error_message: string | null
+  created_at: string
+}
+
+export interface ManualCaptchaFrame {
+  image_b64: string
+  width: number
+  height: number
+}
+
+export interface ManualCaptchaDragResult {
+  passed: boolean
+  cookies?: Record<string, string> | null
+  cookie_saved?: boolean
+  cookie_message?: string
+  restart_message?: string
+}
+
+export interface ManualFallbackConfig {
+  enabled: boolean
+}
+
+// 待人工验证列表（engine=manual, status=processing）
+export const getManualCaptchaPending = async (): Promise<{ success: boolean; data?: ManualCaptchaPendingItem[]; message?: string }> => {
+  const result = await get<{ success: boolean; data?: ManualCaptchaPendingItem[]; message?: string }>(`${API_PREFIX}/captcha/manual/pending`)
+  return { success: Boolean(result.success), data: result.data || [], message: result.message }
+}
+
+// 创建人工验证会话（启动浏览器 + 现取新链接），返回 session_id
+export const prepareManualCaptcha = async (account_id: string): Promise<ApiResponse<{ session_id: string; account_id: string }>> => {
+  return post(`${API_PREFIX}/captcha/manual/prepare`, { account_id })
+}
+
+// 截取滑块页面（base64 JPEG）
+export const getManualCaptchaFrame = async (session_id: string): Promise<ApiResponse<ManualCaptchaFrame>> => {
+  return get(`${API_PREFIX}/captcha/manual/${session_id}/frame`)
+}
+
+// 回放人工拖动轨迹
+export const dragManualCaptcha = async (
+  session_id: string,
+  track: Array<{ x: number; y: number; t: number }>,
+  account_id: string,
+  log_id: number | null,
+): Promise<ApiResponse<ManualCaptchaDragResult>> => {
+  return post(`${API_PREFIX}/captcha/manual/${session_id}/drag`, { track, account_id, log_id })
+}
+
+// 关闭人工验证会话并释放资源
+export const closeManualCaptcha = async (session_id: string): Promise<ApiResponse> => {
+  return post(`${API_PREFIX}/captcha/manual/${session_id}/close`)
+}
+
+// 放弃某条待人工验证记录（标记为 failed，退出待处理列表）
+export const dismissManualCaptcha = async (log_id: number): Promise<ApiResponse> => {
+  return post(`${API_PREFIX}/captcha/manual/pending/${log_id}/dismiss`)
+}
+
+// 读取人工滑块兜底开关（仅管理员）
+export const getManualFallbackConfig = async (): Promise<ApiResponse<ManualFallbackConfig>> => {
+  return get(`${API_PREFIX}/captcha/manual/config`)
+}
+
+// 更新人工滑块兜底开关（仅管理员）
+export const updateManualFallbackConfig = async (enabled: boolean): Promise<ApiResponse<ManualFallbackConfig>> => {
+  return put(`${API_PREFIX}/captcha/manual/config`, { enabled })
+}

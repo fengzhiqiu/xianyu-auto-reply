@@ -334,6 +334,56 @@ class WebSocketServiceClient:
                 "_request_status_unknown": True,
             }
 
+    # ==================== 人工滑块验证（2A）代理 ====================
+
+    async def manual_captcha_prepare(self, account_id: str, cookies: str = "",
+                                     device_id: str = "") -> dict:
+        """请求 websocket 创建人工验证会话（启动浏览器并现取新链接）。
+
+        浏览器启动 + 并发槽位等待可能耗时数十秒，使用独立 aiohttp 会话并放宽超时。
+        """
+        endpoint = f"{self.base_url}/internal/captcha/manual/prepare"
+        try:
+            async with aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=120, connect=10)
+            ) as session:
+                async with session.post(endpoint, json={
+                    "account_id": account_id,
+                    "cookies": cookies or "",
+                    "device_id": device_id or "",
+                }) as resp:
+                    return await resp.json(content_type=None)
+        except Exception as e:
+            logger.error(f"创建人工验证会话失败: account_id={account_id}, 错误: {e}")
+            return {"success": False, "message": f"创建人工验证会话失败: {str(e)}"}
+
+    async def manual_captcha_frame(self, session_id: str) -> dict:
+        """请求 websocket 截取人工验证会话的滑块页面截图（base64 JPEG）。"""
+        url = f"{self.base_url}/internal/captcha/manual/{session_id}/frame"
+        try:
+            return await self.http_client.get(url)
+        except Exception as e:
+            logger.error(f"获取人工验证截图失败: session_id={session_id}, 错误: {e}")
+            return {"success": False, "message": f"获取人工验证截图失败: {str(e)}"}
+
+    async def manual_captcha_drag(self, session_id: str, track: list) -> dict:
+        """请求 websocket 回放人工拖动轨迹，判定是否通过。"""
+        url = f"{self.base_url}/internal/captcha/manual/{session_id}/drag"
+        try:
+            return await self.http_client.post(url, json={"track": track or []})
+        except Exception as e:
+            logger.error(f"回放人工轨迹失败: session_id={session_id}, 错误: {e}")
+            return {"success": False, "message": f"回放人工轨迹失败: {str(e)}"}
+
+    async def manual_captcha_close(self, session_id: str) -> dict:
+        """请求 websocket 关闭人工验证会话并释放资源。"""
+        url = f"{self.base_url}/internal/captcha/manual/{session_id}/close"
+        try:
+            return await self.http_client.post(url)
+        except Exception as e:
+            logger.error(f"关闭人工验证会话失败: session_id={session_id}, 错误: {e}")
+            return {"success": False, "message": f"关闭人工验证会话失败: {str(e)}"}
+
 
 # 全局客户端实例
 websocket_client = WebSocketServiceClient()

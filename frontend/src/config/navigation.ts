@@ -48,6 +48,7 @@ export interface NavItem {
   label: string
   path: string
   adminOnly?: boolean
+  badge?: number
 }
 
 export interface NavGroup {
@@ -142,6 +143,7 @@ export const mainNavItems: NavEntry[] = [
 export const adminNavItems: NavEntry[] = [
   { key: 'settings', icon: Settings, label: '系统设置', path: '/settings', adminOnly: true },
   { key: 'admin-users', icon: UserCog, label: '用户管理', path: '/admin/users', adminOnly: true },
+  { key: 'admin-manual-captcha', icon: AlertTriangle, label: '人工验证', path: '/admin/manual-captcha', adminOnly: true },
   {
     key: 'admin-logs',
     icon: ScrollText,

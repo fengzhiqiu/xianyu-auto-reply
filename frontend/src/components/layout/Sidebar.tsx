@@ -31,6 +31,7 @@ import {
 } from '@/config/navigation'
 import { useMenuVisibilityStore } from '@/store/menuVisibilityStore'
 import { useUIStore } from '@/store/uiStore'
+import { useManualCaptchaStore } from '@/store/manualCaptchaStore'
 import { cn } from '@/utils/cn'
 
 interface SidebarProps {
@@ -41,6 +42,8 @@ export function Sidebar({ systemName = '闲鱼管理系统' }: SidebarProps) {
   const { user } = useAuthStore()
   const { hiddenMenuKeys, isExeMode } = useMenuVisibilityStore()
   const { sidebarCollapsed, sidebarMobileOpen, setSidebarMobileOpen, setSidebarCollapsed } = useUIStore()
+  const pendingCount = useManualCaptchaStore((s) => s.pendingCount)
+  const { refreshPendingCount } = useManualCaptchaStore()
   const location = useLocation()
   const navRef = useRef<HTMLElement>(null)
   const isAdmin = Boolean(user?.is_admin)
@@ -78,6 +81,14 @@ export function Sidebar({ systemName = '闲鱼管理系统' }: SidebarProps) {
     window.addEventListener('resize', handleResize)
     return () => window.removeEventListener('resize', handleResize)
   }, [setSidebarCollapsed])
+
+  // 管理员登录后轮询待人工验证数量（用于侧边栏角标）
+  useEffect(() => {
+    if (!isAdmin) return
+    void refreshPendingCount()
+    const timer = setInterval(() => void refreshPendingCount(), 30000)
+    return () => clearInterval(timer)
+  }, [isAdmin, refreshPendingCount])
 
   // 路由变化时自动展开匹配的分组
   useEffect(() => {
@@ -133,6 +144,7 @@ export function Sidebar({ systemName = '闲鱼管理系统' }: SidebarProps) {
   // 单个菜单项组件
   const NavItemComponent = ({ item, indent = false }: { item: NavItem; indent?: boolean }) => {
     const Icon = item.icon
+    const badgeCount = item.key === 'admin-manual-captcha' ? pendingCount : (item.badge ?? 0)
     return (
       <NavLink
         to={item.path}
@@ -140,7 +152,7 @@ export function Sidebar({ systemName = '闲鱼管理系统' }: SidebarProps) {
         title={!showLabel ? item.label : undefined}
         className={({ isActive }) =>
           cn(
-            'flex items-center gap-3 px-3 py-2.5 rounded-md text-sm transition-all duration-150',
+            'relative flex items-center gap-3 px-3 py-2.5 rounded-md text-sm transition-all duration-150',
             !showLabel && 'justify-center px-2',
             indent && showLabel && 'pl-9',
             isActive
@@ -150,7 +162,19 @@ export function Sidebar({ systemName = '闲鱼管理系统' }: SidebarProps) {
         }
       >
         <Icon className="w-4 h-4 flex-shrink-0" />
-        {showLabel && <span className="truncate">{item.label}</span>}
+        {showLabel && <span className="truncate flex-1">{item.label}</span>}
+        {badgeCount > 0 && (
+          <span
+            className={cn(
+              'rounded-full bg-red-500 text-white font-semibold flex items-center justify-center',
+              showLabel
+                ? 'text-xs min-w-[18px] h-[18px] px-1.5'
+                : 'absolute top-0.5 right-0.5 min-w-[14px] h-[14px] text-[10px] px-0.5'
+            )}
+          >
+            {badgeCount > 99 ? '99+' : badgeCount}
+          </span>
+        )}
       </NavLink>
     )
   }

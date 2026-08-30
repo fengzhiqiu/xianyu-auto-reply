@@ -2856,3 +2856,93 @@ async def system_self_restart():
         "message": result.get("message") or "",
         "data": {"mode": result.get("mode")},
     }
+
+
+# ---------------------------------------------------------------------------
+# 人工滑块验证（2A）：自动过滑块失败后，由后台前端人工拖滑块。
+# 会话生命周期：prepare（建浏览器并取新链接）-> frame（轮询截图）-> drag（回放轨迹）-> close。
+# ---------------------------------------------------------------------------
+
+class ManualCaptchaPrepareRequest(BaseModel):
+    account_id: str = ""   # 账号标识（用于浏览器实例隔离与账号锁）
+    cookies: str = ""      # 账号 Cookie 字符串（用于现取新鲜 punish 链接）
+    device_id: str = ""    # 设备 ID（配合 Cookie 重取链接）
+
+
+class ManualCaptchaDragRequest(BaseModel):
+    # 人工拖动采样的轨迹点列表：x/y 为截图(视口)像素坐标，t 为相对起点毫秒时间戳
+    track: list[dict] = []
+
+
+@router.post("/captcha/manual/prepare")
+async def manual_captcha_prepare(request: ManualCaptchaPrepareRequest):
+    """创建人工验证会话：启动浏览器并现取新鲜 punish 链接，返回 session_id。"""
+    import re
+
+    raw_id = (request.account_id or "").strip()
+    safe_id = re.sub(r"[^A-Za-z0-9_-]", "", raw_id)[:64] or "external"
+    cookies_str = (request.cookies or "").strip()
+    device_id = (request.device_id or "").strip()
+
+    from app.services.captcha.manual_controller import manual_captcha_controller
+
+    try:
+        session = await asyncio.to_thread(
+            manual_captcha_controller.create,
+            safe_id,
+            cookies_str,
+            device_id,
+        )
+    except (TimeoutError, RuntimeError) as e:
+        return {"success": False, "code": 500, "message": str(e), "data": None}
+    except Exception as e:  # noqa: BLE001
+        return {"success": False, "code": 500, "message": f"创建人工验证会话失败: {e}", "data": None}
+
+    return {
+        "success": True,
+        "code": 200,
+        "message": "人工验证会话已就绪",
+        "data": {"session_id": session.session_id, "account_id": safe_id},
+    }
+
+
+@router.get("/captcha/manual/{session_id}/frame")
+async def manual_captcha_frame(session_id: str):
+    """截取当前滑块页面，返回 base64 JPEG（视口截图）供前端展示。"""
+    from app.services.captcha.manual_controller import manual_captcha_controller
+
+    try:
+        session = await asyncio.to_thread(manual_captcha_controller.get, session_id)
+        frame = await asyncio.to_thread(session.execute, "frame", None, 10.0)
+    except KeyError as e:
+        return {"success": False, "code": 404, "message": str(e), "data": None}
+    except Exception as e:  # noqa: BLE001
+        return {"success": False, "code": 500, "message": f"截图失败: {e}", "data": None}
+
+    return {"success": True, "code": 200, "message": "ok", "data": frame}
+
+
+@router.post("/captcha/manual/{session_id}/drag")
+async def manual_captcha_drag(session_id: str, request: ManualCaptchaDragRequest):
+    """回放人工轨迹，判定是否通过；通过时返回 x5* Cookie。"""
+    from app.services.captcha.manual_controller import manual_captcha_controller
+
+    track = request.track or []
+    try:
+        session = await asyncio.to_thread(manual_captcha_controller.get, session_id)
+        result = await asyncio.to_thread(session.execute, "drag", track, 30.0)
+    except KeyError as e:
+        return {"success": False, "code": 404, "message": str(e), "data": None}
+    except Exception as e:  # noqa: BLE001
+        return {"success": False, "code": 500, "message": f"回放轨迹失败: {e}", "data": None}
+
+    return {"success": True, "code": 200, "message": "ok", "data": result}
+
+
+@router.post("/captcha/manual/{session_id}/close")
+async def manual_captcha_close(session_id: str):
+    """关闭人工验证会话并释放浏览器槽位/账号锁。"""
+    from app.services.captcha.manual_controller import manual_captcha_controller
+
+    await asyncio.to_thread(manual_captcha_controller.close, session_id)
+    return {"success": True, "code": 200, "message": "会话已关闭", "data": None}

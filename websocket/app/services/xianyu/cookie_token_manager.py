@@ -645,6 +645,53 @@ class CookieTokenManager:
             logger.warning(f"【{self.cookie_id}】读取远程过滑块配置失败（走本机逻辑）: {self._safe_str(e)}")
         return None
 
+    async def _is_manual_fallback_enabled(self) -> bool:
+        """读取全局「人工滑块兜底」开关（system_settings，仅管理员可配）。默认关闭。"""
+        try:
+            from common.db.session import async_session_maker
+            from common.models.system_setting import SystemSetting
+            from sqlalchemy import select
+
+            async with async_session_maker() as session:
+                value = (
+                    await session.execute(
+                        select(SystemSetting.value).where(
+                            SystemSetting.key == "captcha.manual_fallback_enabled"
+                        )
+                    )
+                ).scalar_one_or_none()
+            return (value or "").strip().lower() in {"1", "true", "yes", "on"}
+        except Exception as e:
+            logger.warning(
+                f"【{self.cookie_id}】读取人工滑块兜底开关失败（默认关闭）: {self._safe_str(e)}"
+            )
+            return False
+
+    def _register_manual_pending_log(self) -> int | None:
+        """自动过滑块失败后，登记一条「待人工验证」风控日志（engine=manual, status=processing）。
+
+        backend-web 的人工伤验证待处理列表据此查询并展示入口。
+        """
+        try:
+            from common.db.compat import db_manager
+
+            log_id = db_manager.add_risk_control_log(
+                cookie_id=self.cookie_id,
+                event_type="slider_captcha",
+                event_description="触发场景: Token刷新自动过滑块失败，等待后台人工验证",
+                processing_status="processing",
+                call_type="local",
+            )
+            if log_id:
+                db_manager.update_risk_control_log(
+                    log_id=log_id,
+                    captcha_engine="manual",
+                )
+            return log_id
+        except Exception as e:
+            logger.error(f"【{self.cookie_id}】登记人工验证待处理日志失败: {self._safe_str(e)}")
+            return None
+
     async def handle_captcha_verification(self, res_json: dict) -> str:
         """处理滑块验证，返回新的cookies字符串"""
         try:
@@ -940,7 +987,27 @@ class CookieTokenManager:
                             )
                         except Exception as update_e:
                             logger.error(f"【{self.cookie_id}】更新风控日志失败: {update_e}")
-                    
+
+                    # 人工滑块兜底（2A）：自动过滑块失败后，若管理员开启开关，
+                    # 登记一条「待人工验证」风控日志（engine=manual, status=processing），
+                    # 并发送通知，由管理员在后台「人工验证」页面手动完成滑块。
+                    try:
+                        if await self._is_manual_fallback_enabled():
+                            manual_log_id = self._register_manual_pending_log()
+                            if manual_log_id:
+                                logger.info(
+                                    f"【{self.cookie_id}】已登记人工验证待处理日志，ID: {manual_log_id}"
+                                )
+                            await self.send_token_refresh_notification(
+                                f"账号 {self.cookie_id} 自动过滑块失败，"
+                                "请在后台「人工验证」页面手动完成滑块。",
+                                "captcha_manual_pending",
+                            )
+                    except Exception as manual_e:
+                        logger.warning(
+                            f"【{self.cookie_id}】登记人工验证兜底失败: {self._safe_str(manual_e)}"
+                        )
+
                     return None
 
             except ImportError as import_e:

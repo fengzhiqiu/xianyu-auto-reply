@@ -832,3 +832,286 @@ async def update_remote_config(
         logger.error(f"保存远程过滑块配置失败: {exc}")
         return ApiResponse(success=False, message="保存远程过滑块配置失败，请稍后重试")
     return ApiResponse(success=True, message="保存成功")
+
+
+# ==================== 人工滑块验证（2A，仅管理员） ====================
+#
+# 自动过滑块失败后（websocket 侧按开关登记「待人工验证」风控日志），管理员在后台
+# 「人工验证」页面：查看待处理列表 -> prepare 建会话 -> frame 轮询截图 -> drag 回放轨迹
+# -> 通过后由本端写回 Cookie 并重启账号。
+
+MANUAL_FALLBACK_ENABLED_KEY = "captcha.manual_fallback_enabled"
+
+
+class ManualCaptchaPrepareRequest(BaseModel):
+    account_id: str = ""   # 账号标识（cookie_id）
+
+
+class ManualCaptchaDragRequest(BaseModel):
+    track: list[dict] = []
+    account_id: str = ""       # 成功后写回 Cookie 与重启账号的标识
+    log_id: int | None = None  # 待处理风控日志 ID，成功后标记为 success
+
+
+@router.get("/manual/pending")
+async def list_manual_pending(
+    current_user: User = Depends(deps.get_current_admin_user),
+    db: AsyncSession = Depends(deps.get_db_session),
+) -> ApiResponse:
+    """列出待人工验证的风控日志（engine=manual, status=processing，仅管理员）。"""
+    from common.models.risk_control_log import XYRiskControlLog
+    from common.models.xy_account import XYAccount
+    from common.utils.time_utils import safe_isoformat
+
+    try:
+        rows = (await db.execute(
+            select(XYRiskControlLog, XYAccount.display_name, XYAccount.remark)
+            .outerjoin(XYAccount, XYAccount.id == XYRiskControlLog.account_pk)
+            .where(
+                XYRiskControlLog.captcha_engine == "manual",
+                XYRiskControlLog.processing_status == "processing",
+            )
+            .order_by(XYRiskControlLog.created_at.desc())
+            .limit(100)
+        )).all()
+
+        items = [
+            {
+                "id": log.id,
+                "account_id": log.account_identifier,
+                "account_pk": log.account_pk,
+                "display_name": display_name or "",
+                "remark": remark or "",
+                "error_message": log.error_message,
+                "created_at": safe_isoformat(log.created_at),
+            }
+            for log, display_name, remark in rows
+        ]
+        return ApiResponse(success=True, data=items)
+    except Exception as exc:
+        logger.error(f"加载人工验证待处理列表失败: {exc}")
+        return ApiResponse(success=False, message=f"加载人工验证待处理列表失败: {str(exc)}")
+
+
+@router.post("/manual/prepare")
+async def manual_captcha_prepare(
+    request: ManualCaptchaPrepareRequest,
+    current_user: User = Depends(deps.get_current_admin_user),
+    db: AsyncSession = Depends(deps.get_db_session),
+) -> ApiResponse:
+    """创建人工验证会话（仅管理员）。返回 session_id 供截图/拖动使用。"""
+    account_id = (request.account_id or "").strip()
+    if not account_id:
+        return ApiResponse(success=False, message="缺少账号标识")
+
+    try:
+        from app.services.account_service import AccountService
+
+        account = await AccountService(db).get_account_by_identifier(account_id)
+        if not account:
+            return ApiResponse(success=False, message=f"账号不存在: {account_id}")
+        cookie_value = account.cookie or ""
+        if not cookie_value:
+            return ApiResponse(success=False, message=f"账号 {account_id} 未配置 Cookie")
+
+        result = await websocket_client.manual_captcha_prepare(
+            account_id=account_id,
+            cookies=cookie_value,
+            device_id="",
+        )
+    except Exception as exc:
+        logger.error(f"创建人工验证会话失败: account_id={account_id}, 错误: {exc}")
+        return ApiResponse(success=False, message=f"创建人工验证会话失败: {str(exc)}")
+
+    if not (isinstance(result, dict) and result.get("success")):
+        msg = (result or {}).get("message") if isinstance(result, dict) else None
+        return ApiResponse(success=False, message=msg or "创建人工验证会话失败")
+    return ApiResponse(
+        success=True,
+        message="人工验证会话已就绪",
+        data={"session_id": result["data"]["session_id"], "account_id": account_id},
+    )
+
+
+@router.get("/manual/{session_id}/frame")
+async def manual_captcha_frame(
+    session_id: str,
+    current_user: User = Depends(deps.get_current_admin_user),
+) -> ApiResponse:
+    """截取人工验证会话的滑块页面（base64 JPEG）。"""
+    result = await websocket_client.manual_captcha_frame(session_id)
+    if not (isinstance(result, dict) and result.get("success")):
+        msg = (result or {}).get("message") if isinstance(result, dict) else None
+        return ApiResponse(success=False, message=msg or "获取截图失败")
+    return ApiResponse(success=True, data=result["data"])
+
+
+@router.post("/manual/{session_id}/drag")
+async def manual_captcha_drag(
+    session_id: str,
+    request: ManualCaptchaDragRequest,
+    current_user: User = Depends(deps.get_current_admin_user),
+    db: AsyncSession = Depends(deps.get_db_session),
+) -> ApiResponse:
+    """回放人工轨迹；通过时写回 Cookie、重启账号并标记待处理日志成功。"""
+    account_id = (request.account_id or "").strip()
+    log_id = request.log_id
+
+    result = await websocket_client.manual_captcha_drag(session_id, request.track)
+    if not (isinstance(result, dict) and result.get("success")):
+        msg = (result or {}).get("message") if isinstance(result, dict) else None
+        return ApiResponse(success=False, message=msg or "回放轨迹失败")
+
+    data = result.get("data") or {}
+    passed = bool(data.get("passed"))
+    cookies = data.get("cookies")
+
+    if not (passed and cookies):
+        # 未通过：让前端继续轮询截图重试，待处理日志保持 processing
+        return ApiResponse(
+            success=True,
+            message="验证未通过，可重试",
+            data={"passed": False},
+        )
+
+    # 通过：写回 x5* Cookie 并重启账号
+    from common.services.account_cookie_service import merge_account_cookie_fields
+    from common.models.risk_control_log import XYRiskControlLog
+    from sqlalchemy import update
+
+    cookie_saved = False
+    cookie_message = ""
+    restart_message = ""
+    if account_id:
+        try:
+            from app.services.account_service import AccountService
+
+            account = await AccountService(db).get_account_by_identifier(account_id)
+            if not account:
+                cookie_message = f"账号不存在: {account_id}"
+            else:
+                saved = await merge_account_cookie_fields(account.id, account_id, cookies)
+                if saved:
+                    cookie_saved = True
+                    cookie_message = "Cookie 已写回数据库"
+                else:
+                    cookie_message = "Cookie 合并写回失败"
+                restart_result = await websocket_client.restart_account(account_id)
+                restart_message = (
+                    "账号任务已重启" if restart_result.get("success") else
+                    f"账号任务重启失败: {restart_result.get('message') or ''}"
+                )
+        except Exception as exc:
+            logger.error(f"人工验证成功后写回Cookie/重启账号失败: account_id={account_id}, 错误: {exc}")
+            cookie_message = f"写回Cookie/重启异常: {str(exc)}"
+
+    # 标记待处理日志成功
+    if log_id:
+        try:
+            await db.execute(
+                update(XYRiskControlLog)
+                .where(XYRiskControlLog.id == int(log_id))
+                .values(
+                    processing_status="success",
+                    captcha_engine="manual",
+                    processing_result="人工滑块验证通过",
+                )
+            )
+            await db.commit()
+        except Exception as exc:
+            logger.error(f"标记人工验证日志成功失败: log_id={log_id}, 错误: {exc}")
+
+    return ApiResponse(
+        success=True,
+        message="验证通过",
+        data={
+            "passed": True,
+            "cookie_saved": cookie_saved,
+            "cookie_message": cookie_message,
+            "restart_message": restart_message,
+        },
+    )
+
+
+@router.post("/manual/{session_id}/close")
+async def manual_captcha_close(
+    session_id: str,
+    current_user: User = Depends(deps.get_current_admin_user),
+) -> ApiResponse:
+    """关闭人工验证会话并释放资源。"""
+    result = await websocket_client.manual_captcha_close(session_id)
+    return ApiResponse(success=True, message="会话已关闭")
+
+
+@router.post("/manual/pending/{log_id}/dismiss")
+async def dismiss_manual_pending(
+    log_id: int,
+    current_user: User = Depends(deps.get_current_admin_user),
+    db: AsyncSession = Depends(deps.get_db_session),
+) -> ApiResponse:
+    """放弃某条待人工验证记录（标记为 failed），使其退出待处理列表。"""
+    from common.models.risk_control_log import XYRiskControlLog
+    from sqlalchemy import update
+
+    try:
+        result = await db.execute(
+            update(XYRiskControlLog)
+            .where(
+                XYRiskControlLog.id == int(log_id),
+                XYRiskControlLog.captcha_engine == "manual",
+                XYRiskControlLog.processing_status == "processing",
+            )
+            .values(
+                processing_status="failed",
+                processing_result="人工验证已放弃",
+            )
+        )
+        await db.commit()
+        if not result.rowcount:
+            return ApiResponse(success=False, message="待处理记录不存在或已处理")
+        return ApiResponse(success=True, message="已放弃该条人工验证")
+    except Exception as exc:
+        logger.error(f"放弃人工验证记录失败: log_id={log_id}, 错误: {exc}")
+        return ApiResponse(success=False, message=f"放弃人工验证记录失败: {str(exc)}")
+
+
+@router.get("/manual/config")
+async def get_manual_fallback_config(
+    current_user: User = Depends(deps.get_current_admin_user),
+    setting_service: SystemSettingService = Depends(deps.get_system_setting_service),
+) -> ApiResponse:
+    """读取人工滑块兜底开关（仅管理员）。"""
+    try:
+        settings = await setting_service.list_settings()
+        enabled = str(settings.get(MANUAL_FALLBACK_ENABLED_KEY, "false")).strip().lower() == "true"
+        return ApiResponse(success=True, data={"enabled": enabled})
+    except Exception as exc:
+        logger.error(f"读取人工滑块兜底开关失败: {exc}")
+        return ApiResponse(success=False, message=f"读取人工滑块兜底开关失败: {str(exc)}")
+
+
+class ManualFallbackConfigUpdate(BaseModel):
+    enabled: bool
+
+
+@router.put("/manual/config")
+async def update_manual_fallback_config(
+    request: ManualFallbackConfigUpdate,
+    current_user: User = Depends(deps.get_current_admin_user),
+    setting_service: SystemSettingService = Depends(deps.get_system_setting_service),
+) -> ApiResponse:
+    """更新人工滑块兜底开关（仅管理员）。"""
+    try:
+        await setting_service.set_setting(
+            MANUAL_FALLBACK_ENABLED_KEY,
+            "true" if request.enabled else "false",
+            "自动过滑块失败后是否登记人工验证待处理并在后台提供人工验证入口",
+        )
+        return ApiResponse(
+            success=True,
+            message="人工滑块兜底已开启" if request.enabled else "人工滑块兜底已关闭",
+            data={"enabled": request.enabled},
+        )
+    except Exception as exc:
+        logger.error(f"更新人工滑块兜底开关失败: {exc}")
+        return ApiResponse(success=False, message=f"更新人工滑块兜底开关失败: {str(exc)}")
