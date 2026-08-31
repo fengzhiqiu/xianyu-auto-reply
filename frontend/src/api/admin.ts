@@ -585,3 +585,21 @@ export const getManualFallbackConfig = async (): Promise<ApiResponse<ManualFallb
 export const updateManualFallbackConfig = async (enabled: boolean): Promise<ApiResponse<ManualFallbackConfig>> => {
   return put(`${API_PREFIX}/captcha/manual/config`, { enabled })
 }
+
+// 创建人工验证实时流 WebSocket（同源 ws，经 Nginx/Vite 反代到 backend-web）
+export function createManualCaptchaStreamWs(sessionId: string): WebSocket {
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+  const host = window.location.host
+  const token = localStorage.getItem('auth_token') || ''
+  const url = `${protocol}//${host}/api/v1/captcha/manual/${encodeURIComponent(sessionId)}/stream?token=${encodeURIComponent(token)}`
+  return new WebSocket(url)
+}
+
+// 判定人工验证结果（通过时后端写回 Cookie + 重启账号）
+export const submitManualCaptcha = async (
+  sessionId: string,
+  accountId: string,
+  logId: number | null,
+): Promise<ApiResponse<ManualCaptchaDragResult>> => {
+  return post(`${API_PREFIX}/captcha/manual/${sessionId}/submit`, { account_id: accountId, log_id: logId })
+}

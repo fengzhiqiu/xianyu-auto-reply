@@ -384,6 +384,24 @@ class WebSocketServiceClient:
             logger.error(f"关闭人工验证会话失败: session_id={session_id}, 错误: {e}")
             return {"success": False, "message": f"关闭人工验证会话失败: {str(e)}"}
 
+    async def manual_captcha_input(self, session_id: str, event: dict) -> dict:
+        """实时转发人工鼠标事件到 websocket 会话（不采样、不回放）。"""
+        url = f"{self.base_url}/internal/captcha/manual/{session_id}/input"
+        try:
+            return await self.http_client.post(url, json=event or {})
+        except Exception as e:
+            logger.error(f"转发人工输入事件失败: session_id={session_id}, 错误: {e}")
+            return {"success": False, "message": f"转发人工输入事件失败: {str(e)}"}
+
+    async def manual_captcha_check(self, session_id: str) -> dict:
+        """请求 websocket 判定人工验证是否通过，返回 {passed, cookies}。"""
+        url = f"{self.base_url}/internal/captcha/manual/{session_id}/check"
+        try:
+            return await self.http_client.post(url)
+        except Exception as e:
+            logger.error(f"判定人工验证结果失败: session_id={session_id}, 错误: {e}")
+            return {"success": False, "message": f"判定人工验证结果失败: {str(e)}"}
+
 
 # 全局客户端实例
 websocket_client = WebSocketServiceClient()

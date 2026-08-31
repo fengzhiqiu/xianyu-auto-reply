@@ -50,6 +50,7 @@ class ManualSession:
 
         self._service: Optional[PlaywrightSliderService] = None
         self._page: Any = None
+        self._cdp_session: Any = None  # 懒创建的 CDP 会话，用于实时鼠标输入派发
 
         self._thread = threading.Thread(
             target=self._run,
@@ -148,6 +149,10 @@ class ManualSession:
     def _handle(self, cmd: str, payload: Any) -> Any:
         if cmd == "frame":
             return self._handle_frame()
+        if cmd == "input":
+            return self._handle_input(payload)
+        if cmd == "check":
+            return self._handle_check()
         if cmd == "drag":
             return self._handle_drag(payload)
         if cmd == "close":
@@ -166,6 +171,61 @@ class ManualSession:
             "width": int(vp.get("width") or 1920),
             "height": int(vp.get("height") or 1080),
         }
+
+    def _handle_input(self, event: Any) -> Dict[str, Any]:
+        """实时派发单个鼠标事件（通过 CDP Input.dispatchMouseEvent）。
+
+        与「采样轨迹后回放」不同，这里把前端人工拖动的每一次 mousedown/move/up
+        原样、实时地打进真实页面，保留人类真实时序，页面即时反馈。
+        """
+        if not self._page:
+            raise RuntimeError("会话未就绪")
+        if not isinstance(event, dict):
+            raise ValueError("输入事件格式错误")
+
+        kind = str(event.get("kind") or "")
+        x = float(event.get("x") or 0)
+        y = float(event.get("y") or 0)
+        button = str(event.get("button") or "none")
+        buttons = int(event.get("buttons") or 0)
+        click_count = int(event.get("clickCount") or 1)
+
+        cdp_type = {
+            "mousedown": "mousePressed",
+            "mousemove": "mouseMoved",
+            "mouseup": "mouseReleased",
+        }.get(kind)
+        if cdp_type is None:
+            raise ValueError(f"不支持的鼠标事件类型: {kind}")
+
+        if self._cdp_session is None:
+            self._cdp_session = self._page.context.new_cdp_session(self._page)
+
+        self._cdp_session.send(
+            "Input.dispatchMouseEvent",
+            {
+                "type": cdp_type,
+                "x": x,
+                "y": y,
+                "button": button,
+                "buttons": buttons,
+                "clickCount": click_count,
+                "modifiers": 0,
+            },
+        )
+        return {"ok": True}
+
+    def _handle_check(self) -> Dict[str, Any]:
+        """判定是否通过：等待页面稳定后读取 x5* Cookie。"""
+        if not self._page:
+            raise RuntimeError("会话未就绪")
+        time.sleep(0.5)  # 等页面在 mouseup 后稳定/跳转
+        cookies = self._service._get_cookies_after_success() if self._service else None
+        if cookies:
+            logger.success(f"【{self.account_id}】人工滑块验证通过")
+            return {"passed": True, "cookies": cookies}
+        logger.info(f"【{self.account_id}】人工滑块未通过，可重试")
+        return {"passed": False, "cookies": None}
 
     def _handle_drag(self, track: Any) -> Dict[str, Any]:
         if not self._page:

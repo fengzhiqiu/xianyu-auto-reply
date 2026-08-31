@@ -1,14 +1,15 @@
 /**
- * 人工滑块验证页面（2A）
+ * 人工滑块验证页面（2A - 实时远程操控版）
  *
  * 功能：
  * 1. 展示「待人工验证」列表（自动过滑块失败后由 websocket 侧登记）。
  * 2. 管理员点击「处理」→ 创建浏览器会话并现取新鲜滑块链接。
- * 3. 轮询截图展示滑块页面，管理员真实拖动滑块，轨迹被采样并回放给浏览器。
- * 4. 通过后由后端写回 x5* Cookie 并重启账号；可随时放弃或关闭。
+ * 3. 通过 WebSocket 实时接收浏览器画面（~8fps），管理员真实拖动滑块，
+ *    每次鼠标事件实时转发给真实浏览器（不再采样/回放，滑块实时跟手）。
+ * 4. 松开鼠标后自动判定；通过后由后端写回 x5* Cookie 并重启账号。
  */
 import { useCallback, useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react'
-import { Loader2, RefreshCw, Info, ShieldAlert, X } from 'lucide-react'
+import { Loader2, RefreshCw, Info, ShieldAlert, X, Wifi, WifiOff } from 'lucide-react'
 import { useAuthStore } from '@/store/authStore'
 import { useUIStore } from '@/store/uiStore'
 import { useManualCaptchaStore } from '@/store/manualCaptchaStore'
@@ -17,20 +18,19 @@ import { getApiErrorMessage } from '@/utils/request'
 import {
   getManualCaptchaPending,
   prepareManualCaptcha,
-  getManualCaptchaFrame,
-  dragManualCaptcha,
   closeManualCaptcha,
   dismissManualCaptcha,
   getManualFallbackConfig,
   updateManualFallbackConfig,
+  createManualCaptchaStreamWs,
+  submitManualCaptcha,
   type ManualCaptchaPendingItem,
   type ManualCaptchaFrame,
 } from '@/api/admin'
 
-interface TrackPoint {
+interface Point {
   x: number
   y: number
-  t: number
 }
 
 export function ManualCaptcha() {
@@ -47,6 +47,7 @@ export function ManualCaptcha() {
   const [sessionId, setSessionId] = useState<string | null>(null)
   const [frame, setFrame] = useState<ManualCaptchaFrame | null>(null)
   const [frameError, setFrameError] = useState('')
+  const [connected, setConnected] = useState(false)
   const [dragging, setDragging] = useState(false)
   const [submitting, setSubmitting] = useState(false)
 
@@ -55,12 +56,13 @@ export function ManualCaptcha() {
   const [configLoading, setConfigLoading] = useState(true)
   const [savingConfig, setSavingConfig] = useState(false)
 
-  // 拖动轨迹采样相关 ref
+  // 实时流 / 拖动相关 ref
   const imgRef = useRef<HTMLImageElement | null>(null)
-  const trackRef = useRef<TrackPoint[]>([])
-  const startTimeRef = useRef(0)
+  const wsRef = useRef<WebSocket | null>(null)
   const draggingRef = useRef(false)
   const submittingRef = useRef(false)
+  const lastMoveAtRef = useRef(0)
+  const pingTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   const loadPending = useCallback(async () => {
     if (!_hasHydrated || !isAuthenticated || !token) return
@@ -102,31 +104,18 @@ export function ManualCaptcha() {
     loadConfig()
   }, [loadPending, loadConfig])
 
-  const fetchFrame = useCallback(async (sid: string) => {
-    try {
-      const res = await getManualCaptchaFrame(sid)
-      if (res.success && res.data) {
-        setFrame(res.data)
-        setFrameError('')
-      } else {
-        setFrameError(res.message || '截图失败')
-      }
-    } catch (error) {
-      setFrameError(getApiErrorMessage(error, '截图失败'))
-    }
-  }, [])
-
-  // 轮询截图（拖动与提交期间暂停，避免图片被替换打断操作）
-  useEffect(() => {
-    if (!sessionId) return
-    const timer = setInterval(() => {
-      if (draggingRef.current || submittingRef.current) return
-      void fetchFrame(sessionId)
-    }, 500)
-    return () => clearInterval(timer)
-  }, [sessionId, fetchFrame])
-
   const closeSession = useCallback(async () => {
+    if (wsRef.current) {
+      wsRef.current.onmessage = null
+      wsRef.current.onclose = null
+      wsRef.current.onerror = null
+      wsRef.current.close()
+      wsRef.current = null
+    }
+    if (pingTimerRef.current) {
+      clearInterval(pingTimerRef.current)
+      pingTimerRef.current = null
+    }
     if (sessionId) {
       try {
         await closeManualCaptcha(sessionId)
@@ -138,28 +127,67 @@ export function ManualCaptcha() {
     setActiveItem(null)
     setFrame(null)
     setFrameError('')
-    trackRef.current = []
+    setConnected(false)
+    setDragging(false)
   }, [sessionId])
 
-  // 页面卸载时关闭会话
+  const openStream = useCallback((sid: string) => {
+    const ws = createManualCaptchaStreamWs(sid)
+    wsRef.current = ws
+    setFrame(null)
+    setFrameError('')
+    setConnected(false)
+
+    ws.onopen = () => setConnected(true)
+    ws.onmessage = (ev) => {
+      let msg: { event?: string; data?: ManualCaptchaFrame; message?: string }
+      try {
+        msg = JSON.parse(ev.data)
+      } catch {
+        return
+      }
+      if (msg.event === 'frame' && msg.data) {
+        setFrame(msg.data)
+        setFrameError('')
+      } else if (msg.event === 'error') {
+        setFrameError(msg.message || '截图失败')
+      }
+      // pong / 其它事件忽略
+    }
+    ws.onclose = () => setConnected(false)
+    ws.onerror = () => setConnected(false)
+
+    // 心跳保活
+    pingTimerRef.current = setInterval(() => {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'ping' }))
+      }
+    }, 25000)
+  }, [])
+
+  // 页面卸载时关闭会话与 WS
   useEffect(() => {
     return () => {
       if (sessionId) {
         void closeManualCaptcha(sessionId)
       }
+      if (wsRef.current) {
+        wsRef.current.close()
+      }
     }
   }, [sessionId])
 
   const handleSolve = async (item: ManualCaptchaPendingItem) => {
+    if (sessionId) {
+      await closeSession()
+    }
     setPreparing(true)
     try {
       const res = await prepareManualCaptcha(item.account_id)
       if (res.success && res.data?.session_id) {
         setActiveItem(item)
         setSessionId(res.data.session_id)
-        setFrame(null)
-        setFrameError('')
-        await fetchFrame(res.data.session_id)
+        openStream(res.data.session_id)
       } else {
         addToast({ type: 'error', message: res.message || '创建人工验证会话失败' })
       }
@@ -181,18 +209,21 @@ export function ManualCaptcha() {
     }
   }
 
-  const submitDrag = async () => {
-    if (!sessionId || !activeItem) return
-    if (trackRef.current.length < 2) return
+  const sendInput = (event: Record<string, unknown>) => {
+    const ws = wsRef.current
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'input', event }))
+    }
+  }
+
+  const handleSubmit = async () => {
+    if (!sessionId || !activeItem || submittingRef.current) return
     submittingRef.current = true
     setSubmitting(true)
     try {
-      const res = await dragManualCaptcha(
-        sessionId,
-        trackRef.current,
-        activeItem.account_id,
-        activeItem.id,
-      )
+      // 松开后稍等页面判定/跳转，再检查结果
+      await new Promise((r) => setTimeout(r, 1200))
+      const res = await submitManualCaptcha(sessionId, activeItem.account_id, activeItem.id)
       if (res.success && res.data?.passed) {
         addToast({
           type: 'success',
@@ -202,31 +233,27 @@ export function ManualCaptcha() {
         loadPending()
         void refreshPendingCount()
       } else {
-        addToast({
-          type: 'warning',
-          message: res.message || res.data?.cookie_message || '验证未通过，请重试',
-        })
-        // 立即刷新一帧，展示滑块重试状态
-        await fetchFrame(sessionId)
+        addToast({ type: 'warning', message: res.message || '验证未通过，可继续拖动重试' })
+        // 保持流式，滑块页面会实时复位，管理员直接再拖一次
       }
     } catch (error) {
-      addToast({ type: 'error', message: getApiErrorMessage(error, '回放轨迹失败') })
+      addToast({ type: 'error', message: getApiErrorMessage(error, '判定结果失败') })
     } finally {
       submittingRef.current = false
       setSubmitting(false)
-      trackRef.current = []
     }
   }
 
-  // ---- 拖动采样 ----
-  const getNaturalPoint = (e: MouseEvent): TrackPoint | null => {
+  // ---- 实时鼠标输入采样（不做轨迹回放，只做坐标换算后原样转发） ----
+  const getNaturalPoint = (e: MouseEvent): Point | null => {
     const img = imgRef.current
     if (!img || !img.naturalWidth || !img.naturalHeight) return null
     const rect = img.getBoundingClientRect()
     if (rect.width <= 0 || rect.height <= 0) return null
-    const x = ((e.clientX - rect.left) / rect.width) * img.naturalWidth
-    const y = ((e.clientY - rect.top) / rect.height) * img.naturalHeight
-    return { x: Math.round(x), y: Math.round(y), t: 0 }
+    return {
+      x: Math.round(((e.clientX - rect.left) / rect.width) * img.naturalWidth),
+      y: Math.round(((e.clientY - rect.top) / rect.height) * img.naturalHeight),
+    }
   }
 
   const handleMouseDown = (e: ReactMouseEvent<HTMLImageElement>) => {
@@ -234,18 +261,22 @@ export function ManualCaptcha() {
     const p = getNaturalPoint(e.nativeEvent)
     if (!p) return
     e.preventDefault()
-    startTimeRef.current = performance.now()
-    trackRef.current = [{ x: p.x, y: p.y, t: 0 }]
     draggingRef.current = true
     setDragging(true)
+    lastMoveAtRef.current = 0
+    sendInput({ kind: 'mousedown', x: p.x, y: p.y, button: 'left', buttons: 1, clickCount: 1 })
     window.addEventListener('mousemove', handleWindowMouseMove)
     window.addEventListener('mouseup', handleWindowMouseUp)
   }
 
   const handleWindowMouseMove = (e: MouseEvent) => {
+    // 轻节流，避免刷爆通道（~60Hz 足够）
+    const now = performance.now()
+    if (now - lastMoveAtRef.current < 16) return
+    lastMoveAtRef.current = now
     const p = getNaturalPoint(e)
     if (!p) return
-    trackRef.current.push({ x: p.x, y: p.y, t: Math.round(performance.now() - startTimeRef.current) })
+    sendInput({ kind: 'mousemove', x: p.x, y: p.y, button: 'none', buttons: 1 })
   }
 
   const handleWindowMouseUp = (e: MouseEvent) => {
@@ -253,15 +284,11 @@ export function ManualCaptcha() {
     window.removeEventListener('mouseup', handleWindowMouseUp)
     const p = getNaturalPoint(e)
     if (p) {
-      trackRef.current.push({ x: p.x, y: p.y, t: Math.round(performance.now() - startTimeRef.current) })
+      sendInput({ kind: 'mouseup', x: p.x, y: p.y, button: 'left', buttons: 0, clickCount: 1 })
     }
     draggingRef.current = false
     setDragging(false)
-    if (trackRef.current.length >= 2) {
-      void submitDrag()
-    } else {
-      trackRef.current = []
-    }
+    void handleSubmit()
   }
 
   const handleConfigChange = async () => {
@@ -294,7 +321,7 @@ export function ManualCaptcha() {
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
           <h1 className="page-title">人工验证</h1>
-          <p className="page-description">自动过滑块失败后，在此手动完成滑块验证</p>
+          <p className="page-description">自动过滑块失败后，在此实时远程操控浏览器完成滑块验证</p>
         </div>
         <div className="flex items-center gap-3">
           <span className="text-sm font-medium text-slate-700 dark:text-slate-200">人工滑块兜底</span>
@@ -329,7 +356,7 @@ export function ManualCaptcha() {
         <div className="flex items-start gap-2">
           <Info className="w-4 h-4 mt-0.5 shrink-0 text-blue-500 dark:text-blue-400" />
           <p className="text-sm text-blue-700 dark:text-blue-300">
-            开启「人工滑块兜底」后，账号自动过滑块失败会在此登记待处理记录。点击「处理」会打开真实浏览器滑块页面，拖动图片中的滑块即可完成验证；通过后 Cookie 会自动写回并重启账号。
+            开启「人工滑块兜底」后，账号自动过滑块失败会在此登记待处理记录。点击「处理」后会在下方实时显示真实浏览器画面，直接拖动画面中的滑块即可；滑块会实时跟手，松开后自动判定，通过后 Cookie 自动写回并重启账号。
           </p>
         </div>
       </div>
@@ -401,6 +428,19 @@ export function ManualCaptcha() {
               {activeItem.remark ? ` (${activeItem.remark})` : ''}
             </h2>
             <div className="flex items-center gap-3">
+              <span className="flex items-center gap-1.5 text-sm text-slate-500 dark:text-slate-400">
+                {connected ? (
+                  <>
+                    <Wifi className="w-4 h-4 text-green-500" />
+                    已连接
+                  </>
+                ) : (
+                  <>
+                    <WifiOff className="w-4 h-4 text-red-500" />
+                    连接中…
+                  </>
+                )}
+              </span>
               <button onClick={() => { void closeSession(); loadPending() }} className="btn-ios-secondary">
                 <X className="w-4 h-4" />
                 关闭会话
@@ -409,21 +449,20 @@ export function ManualCaptcha() {
           </div>
           <div className="vben-card-body">
             <p className="mb-3 text-sm text-slate-600 dark:text-slate-300">
-              按住图片中的滑块向右拖动到缺口位置（轨迹会实时采样并回放给浏览器）。
+              直接按住画面中的滑块向右拖动到缺口位置（拖动实时同步到真实浏览器）。
               {submitting ? '正在判定结果…' : dragging ? '拖动中…' : '请开始拖动。'}
             </p>
             {frameError ? (
               <div className="flex items-center gap-2 text-sm text-red-600 dark:text-red-400">
                 <Info className="w-4 h-4" />
                 {frameError}
-                <button onClick={() => sessionId && fetchFrame(sessionId)} className="underline">重试</button>
               </div>
             ) : frame ? (
               <div className="border border-slate-200 dark:border-slate-700 rounded-lg overflow-hidden bg-slate-100 dark:bg-slate-900">
                 <img
                   ref={imgRef}
                   src={frameSrc}
-                  alt="滑块验证页面"
+                  alt="滑块验证页面（实时）"
                   draggable={false}
                   onMouseDown={handleMouseDown}
                   className={`max-w-full h-auto select-none ${dragging ? 'cursor-grabbing' : 'cursor-grab'}`}
@@ -432,7 +471,7 @@ export function ManualCaptcha() {
             ) : (
               <div className="flex items-center justify-center py-16 text-slate-400 dark:text-slate-500">
                 <Loader2 className="w-6 h-6 animate-spin mr-2" />
-                正在加载截图…
+                正在加载实时画面…
               </div>
             )}
           </div>

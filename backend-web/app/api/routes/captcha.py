@@ -5,6 +5,8 @@
 """
 from __future__ import annotations
 
+import asyncio
+import json
 import math
 import random
 import re
@@ -12,7 +14,7 @@ import string
 import time
 from typing import Optional
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, EmailStr
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -853,6 +855,79 @@ class ManualCaptchaDragRequest(BaseModel):
     log_id: int | None = None  # 待处理风控日志 ID，成功后标记为 success
 
 
+class ManualCaptchaInputRequest(BaseModel):
+    kind: str = ""              # mousedown / mousemove / mouseup
+    x: float = 0.0
+    y: float = 0.0
+    button: str = "none"        # left / middle / right / none
+    buttons: int = 0            # 位掩码：1=左键按下
+    clickCount: int = 1
+
+
+class ManualCaptchaSubmitRequest(BaseModel):
+    account_id: str = ""        # 成功后写回 Cookie 与重启账号的标识
+    log_id: int | None = None   # 待处理风控日志 ID，成功后标记为 success
+
+
+async def _finalize_manual_success(
+    db: AsyncSession,
+    account_id: str,
+    log_id: int | None,
+    cookies: dict,
+) -> dict:
+    """人工验证通过后的收尾：写回 x5* Cookie、重启账号、标记待处理日志成功。"""
+    from common.services.account_cookie_service import merge_account_cookie_fields
+    from common.models.risk_control_log import XYRiskControlLog
+    from sqlalchemy import update
+
+    cookie_saved = False
+    cookie_message = ""
+    restart_message = ""
+    if account_id:
+        try:
+            from app.services.account_service import AccountService
+
+            account = await AccountService(db).get_account_by_identifier(account_id)
+            if not account:
+                cookie_message = f"账号不存在: {account_id}"
+            else:
+                saved = await merge_account_cookie_fields(account.id, account_id, cookies)
+                if saved:
+                    cookie_saved = True
+                    cookie_message = "Cookie 已写回数据库"
+                else:
+                    cookie_message = "Cookie 合并写回失败"
+                restart_result = await websocket_client.restart_account(account_id)
+                restart_message = (
+                    "账号任务已重启" if restart_result.get("success") else
+                    f"账号任务重启失败: {restart_result.get('message') or ''}"
+                )
+        except Exception as exc:
+            logger.error(f"人工验证成功后写回Cookie/重启账号失败: account_id={account_id}, 错误: {exc}")
+            cookie_message = f"写回Cookie/重启异常: {str(exc)}"
+
+    if log_id:
+        try:
+            await db.execute(
+                update(XYRiskControlLog)
+                .where(XYRiskControlLog.id == int(log_id))
+                .values(
+                    processing_status="success",
+                    captcha_engine="manual",
+                    processing_result="人工滑块验证通过",
+                )
+            )
+            await db.commit()
+        except Exception as exc:
+            logger.error(f"标记人工验证日志成功失败: log_id={log_id}, 错误: {exc}")
+
+    return {
+        "cookie_saved": cookie_saved,
+        "cookie_message": cookie_message,
+        "restart_message": restart_message,
+    }
+
+
 @router.get("/manual/pending")
 async def list_manual_pending(
     current_user: User = Depends(deps.get_current_admin_user),
@@ -974,62 +1049,12 @@ async def manual_captcha_drag(
             data={"passed": False},
         )
 
-    # 通过：写回 x5* Cookie 并重启账号
-    from common.services.account_cookie_service import merge_account_cookie_fields
-    from common.models.risk_control_log import XYRiskControlLog
-    from sqlalchemy import update
-
-    cookie_saved = False
-    cookie_message = ""
-    restart_message = ""
-    if account_id:
-        try:
-            from app.services.account_service import AccountService
-
-            account = await AccountService(db).get_account_by_identifier(account_id)
-            if not account:
-                cookie_message = f"账号不存在: {account_id}"
-            else:
-                saved = await merge_account_cookie_fields(account.id, account_id, cookies)
-                if saved:
-                    cookie_saved = True
-                    cookie_message = "Cookie 已写回数据库"
-                else:
-                    cookie_message = "Cookie 合并写回失败"
-                restart_result = await websocket_client.restart_account(account_id)
-                restart_message = (
-                    "账号任务已重启" if restart_result.get("success") else
-                    f"账号任务重启失败: {restart_result.get('message') or ''}"
-                )
-        except Exception as exc:
-            logger.error(f"人工验证成功后写回Cookie/重启账号失败: account_id={account_id}, 错误: {exc}")
-            cookie_message = f"写回Cookie/重启异常: {str(exc)}"
-
-    # 标记待处理日志成功
-    if log_id:
-        try:
-            await db.execute(
-                update(XYRiskControlLog)
-                .where(XYRiskControlLog.id == int(log_id))
-                .values(
-                    processing_status="success",
-                    captcha_engine="manual",
-                    processing_result="人工滑块验证通过",
-                )
-            )
-            await db.commit()
-        except Exception as exc:
-            logger.error(f"标记人工验证日志成功失败: log_id={log_id}, 错误: {exc}")
-
+    # 通过：写回 x5* Cookie、重启账号并标记待处理日志成功
+    finalize = await _finalize_manual_success(db, account_id, log_id, cookies)
     return ApiResponse(
         success=True,
         message="验证通过",
-        data={
-            "passed": True,
-            "cookie_saved": cookie_saved,
-            "cookie_message": cookie_message,
-            "restart_message": restart_message,
-        },
+        data={"passed": True, **finalize},
     )
 
 
@@ -1041,6 +1066,154 @@ async def manual_captcha_close(
     """关闭人工验证会话并释放资源。"""
     result = await websocket_client.manual_captcha_close(session_id)
     return ApiResponse(success=True, message="会话已关闭")
+
+
+@router.post("/manual/{session_id}/input")
+async def manual_captcha_input(
+    session_id: str,
+    request: ManualCaptchaInputRequest,
+    current_user: User = Depends(deps.get_current_admin_user),
+) -> ApiResponse:
+    """实时转发人工鼠标事件到真实页面（仅管理员）。"""
+    result = await websocket_client.manual_captcha_input(
+        session_id,
+        {
+            "kind": request.kind,
+            "x": request.x,
+            "y": request.y,
+            "button": request.button,
+            "buttons": request.buttons,
+            "clickCount": request.clickCount,
+        },
+    )
+    if not (isinstance(result, dict) and result.get("success")):
+        msg = (result or {}).get("message") if isinstance(result, dict) else None
+        return ApiResponse(success=False, message=msg or "转发输入事件失败")
+    return ApiResponse(success=True, data=result.get("data"))
+
+
+@router.post("/manual/{session_id}/submit")
+async def manual_captcha_submit(
+    session_id: str,
+    request: ManualCaptchaSubmitRequest,
+    current_user: User = Depends(deps.get_current_admin_user),
+    db: AsyncSession = Depends(deps.get_db_session),
+) -> ApiResponse:
+    """判定人工验证结果；通过时写回 Cookie、重启账号并标记日志成功（仅管理员）。"""
+    account_id = (request.account_id or "").strip()
+    log_id = request.log_id
+
+    result = await websocket_client.manual_captcha_check(session_id)
+    if not (isinstance(result, dict) and result.get("success")):
+        msg = (result or {}).get("message") if isinstance(result, dict) else None
+        return ApiResponse(success=False, message=msg or "判定验证结果失败")
+
+    data = result.get("data") or {}
+    passed = bool(data.get("passed"))
+    cookies = data.get("cookies")
+
+    if not (passed and cookies):
+        # 未通过：保持流式，管理员可直接再拖一次
+        return ApiResponse(success=True, message="验证未通过，可重试", data={"passed": False})
+
+    finalize = await _finalize_manual_success(db, account_id, log_id, cookies)
+    return ApiResponse(
+        success=True,
+        message="验证通过",
+        data={"passed": True, **finalize},
+    )
+
+
+@router.websocket("/manual/{session_id}/stream")
+async def manual_captcha_stream(
+    websocket: WebSocket,
+    session_id: str,
+    token: str | None = Query(default=None),
+):
+    """人工验证实时流（仅管理员）。
+
+    下行：以 ~8fps 轮询 websocket 服务的截图并推送 frame 事件。
+    上行：接收 input 事件并实时转发到真实页面；支持 ping 心跳。
+    """
+    from app.core.security import decode_token
+    from jose import JWTError
+    from common.models import UserRole, UserStatus
+    from common.schemas.auth import TokenPayload
+
+    await websocket.accept()
+
+    # 鉴权：先 accept 再校验，确保自定义关闭码能通过 WebSocket 关闭帧送达浏览器
+    if not token:
+        await websocket.close(code=4401)
+        return
+    try:
+        payload = TokenPayload(**decode_token(token))
+        user_id = int(payload.sub)
+    except (JWTError, ValueError, TypeError):
+        await websocket.close(code=4401)
+        return
+
+    async with async_session_maker() as session:
+        result = await session.execute(select(User).where(User.id == user_id))
+        user = result.scalar_one_or_none()
+    if not user or user.status != UserStatus.ACTIVE or user.role != UserRole.ADMIN:
+        await websocket.close(code=4403)
+        return
+
+    logger.info(f"【{session_id}】人工验证实时流已连接（管理员 {user.id}）")
+
+    FRAME_INTERVAL = 0.125  # 8fps
+
+    async def pump_frames() -> None:
+        while True:
+            try:
+                res = await websocket_client.manual_captcha_frame(session_id)
+                if isinstance(res, dict) and res.get("success"):
+                    await websocket.send_text(json.dumps(
+                        {"event": "frame", "data": res.get("data")},
+                        ensure_ascii=False,
+                    ))
+                else:
+                    msg = (res or {}).get("message", "截图失败") if isinstance(res, dict) else "截图失败"
+                    await websocket.send_text(json.dumps(
+                        {"event": "error", "message": msg},
+                        ensure_ascii=False,
+                    ))
+            except WebSocketDisconnect:
+                break
+            except Exception as exc:  # noqa: BLE001
+                logger.error(f"【{session_id}】人工验证流截图失败: {exc}")
+            await asyncio.sleep(FRAME_INTERVAL)
+
+    pump_task = asyncio.create_task(pump_frames())
+
+    try:
+        while True:
+            data = await websocket.receive_text()
+            try:
+                msg = json.loads(data)
+            except json.JSONDecodeError:
+                continue
+
+            msg_type = msg.get("type", "")
+            if msg_type == "ping":
+                await websocket.send_text(json.dumps({"event": "pong"}, ensure_ascii=False))
+            elif msg_type == "input":
+                event = msg.get("event") or {}
+                await websocket_client.manual_captcha_input(session_id, event)
+            else:
+                logger.info(f"【{session_id}】人工验证流收到未知消息类型: {msg_type}")
+    except WebSocketDisconnect:
+        logger.info(f"【{session_id}】人工验证实时流已断开")
+    except Exception as exc:  # noqa: BLE001
+        logger.error(f"【{session_id}】人工验证实时流异常: {exc}")
+    finally:
+        pump_task.cancel()
+        try:
+            await pump_task
+        except asyncio.CancelledError:
+            pass
+        logger.info(f"【{session_id}】人工验证实时流已清理")
 
 
 @router.post("/manual/pending/{log_id}/dismiss")

@@ -2874,6 +2874,16 @@ class ManualCaptchaDragRequest(BaseModel):
     track: list[dict] = []
 
 
+class ManualCaptchaInputRequest(BaseModel):
+    # 实时人工鼠标事件：kind 为 mousedown/mousemove/mouseup；x/y 为截图(视口)像素坐标
+    kind: str = ""
+    x: float = 0.0
+    y: float = 0.0
+    button: str = "none"  # left / middle / right / none
+    buttons: int = 0      # 位掩码：1=左键按下
+    clickCount: int = 1
+
+
 @router.post("/captcha/manual/prepare")
 async def manual_captcha_prepare(request: ManualCaptchaPrepareRequest):
     """创建人工验证会话：启动浏览器并现取新鲜 punish 链接，返回 session_id。"""
@@ -2935,6 +2945,46 @@ async def manual_captcha_drag(session_id: str, request: ManualCaptchaDragRequest
         return {"success": False, "code": 404, "message": str(e), "data": None}
     except Exception as e:  # noqa: BLE001
         return {"success": False, "code": 500, "message": f"回放轨迹失败: {e}", "data": None}
+
+    return {"success": True, "code": 200, "message": "ok", "data": result}
+
+
+@router.post("/captcha/manual/{session_id}/input")
+async def manual_captcha_input(session_id: str, request: ManualCaptchaInputRequest):
+    """实时派发人工鼠标事件到真实页面（不采样、不回放）。"""
+    from app.services.captcha.manual_controller import manual_captcha_controller
+
+    event = {
+        "kind": request.kind,
+        "x": request.x,
+        "y": request.y,
+        "button": request.button,
+        "buttons": request.buttons,
+        "clickCount": request.clickCount,
+    }
+    try:
+        session = await asyncio.to_thread(manual_captcha_controller.get, session_id)
+        result = await asyncio.to_thread(session.execute, "input", event, 5.0)
+    except KeyError as e:
+        return {"success": False, "code": 404, "message": str(e), "data": None}
+    except Exception as e:  # noqa: BLE001
+        return {"success": False, "code": 500, "message": f"派发输入事件失败: {e}", "data": None}
+
+    return {"success": True, "code": 200, "message": "ok", "data": result}
+
+
+@router.post("/captcha/manual/{session_id}/check")
+async def manual_captcha_check(session_id: str):
+    """判定是否通过，返回 {passed, cookies}。"""
+    from app.services.captcha.manual_controller import manual_captcha_controller
+
+    try:
+        session = await asyncio.to_thread(manual_captcha_controller.get, session_id)
+        result = await asyncio.to_thread(session.execute, "check", None, 10.0)
+    except KeyError as e:
+        return {"success": False, "code": 404, "message": str(e), "data": None}
+    except Exception as e:  # noqa: BLE001
+        return {"success": False, "code": 500, "message": f"判定验证结果失败: {e}", "data": None}
 
     return {"success": True, "code": 200, "message": "ok", "data": result}
 
