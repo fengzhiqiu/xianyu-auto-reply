@@ -103,11 +103,24 @@ async def _resolve_item_address(item_data: dict[str, Any]) -> dict[str, str]:
 def _build_category_label(item_data: dict[str, Any]) -> dict[str, Any]:
     """构造抓包中的分类属性标签，确保平台分类和分类ID一同提交。"""
     channel_id = _text(item_data.get("platform_channel_category_id"))
-    channel_name = _text(item_data.get("platform_channel_category_name"))
     category_name = _text(item_data.get("platform_category_name"))
+    # 频道分类名称允许缺失：推荐接口的部分候选不带 channelCatName，此时用末级分类名称兜底，
+    # 与编辑映射（xianyu_item_edit_mapper）和分类选择构造（platform_category_selection）保持一致。
+    channel_name = _text(item_data.get("platform_channel_category_name")) or category_name
     tb_cat_id = _text(item_data.get("platform_tb_category_id"))
     if not channel_id or not channel_name or not tb_cat_id:
-        raise DirectPublishError("请先根据商品描述重新选择完整的平台商品分类")
+        missing = [
+            name
+            for name, value in (
+                ("频道分类ID", channel_id),
+                ("分类名称", channel_name),
+                ("淘宝分类ID", tb_cat_id),
+            )
+            if not value
+        ]
+        raise DirectPublishError(
+            "平台商品分类信息不完整，缺少 " + "、".join(missing) + "，请重新选择完整的平台商品分类"
+        )
     return {
         "channelCateName": channel_name,
         "valueId": None,
