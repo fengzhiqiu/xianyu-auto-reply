@@ -99,6 +99,7 @@ export function ProductPublishForm({ form, setForm, accounts, onUploadSpecImage,
               onChange={update}
               categoryLocked={categoryLocked}
               onReselectCategory={onCategoryEdit}
+              isFishShop={isFishShop}
             />
           </section>
 

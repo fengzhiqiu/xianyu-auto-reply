@@ -213,6 +213,11 @@ class CategoryRecommendRequest(BaseModel):
     cat_id: str = Field("", max_length=80, description="当前已选闲鱼末级分类ID")
     cat_name: str = Field("", max_length=200, description="当前已选分类名称")
     channel_cat_id: str = Field("", max_length=80, description="当前已选频道分类ID")
+    is_fish_shop: Optional[bool] = Field(
+        None,
+        description="指定账号是否开通鱼小铺；False 表示普通卖家，将按个人版发布场景请求分类。"
+        "为 None 时沿用鱼小铺场景（素材库等无账号能力上下文的入口）。",
+    )
 
 
 @router.post("/category/recommend", response_model=ApiResponse)
@@ -268,6 +273,7 @@ async def recommend_category(
                 cat_id=req.cat_id,
                 cat_name=req.cat_name,
                 channel_cat_id=req.channel_cat_id,
+                is_fish_shop=req.is_fish_shop,
             )
             return ApiResponse(success=True, message="分类推荐成功", data=data)
         except CategoryRecommendationError as exc:

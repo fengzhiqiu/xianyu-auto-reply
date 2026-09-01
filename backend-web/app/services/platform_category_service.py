@@ -276,6 +276,7 @@ class PlatformCategoryService:
         cat_id: str = "",
         cat_name: str = "",
         channel_cat_id: str = "",
+        is_fish_shop: bool | None = None,
     ) -> dict[str, Any]:
         """
         根据标题和描述返回平台分类候选，令牌过期时自动刷新并重试一次。
@@ -291,6 +292,10 @@ class PlatformCategoryService:
         cat_id: 当前已选的闲鱼末级分类ID。
         cat_name: 当前已选分类名称。
         channel_cat_id: 当前已选频道分类ID。
+        is_fish_shop: 账号是否开通鱼小铺；False 表示普通卖家。普通卖家必须走个人版
+            发布场景（pcMainPublish），否则分类推荐接口在鱼小铺场景下拿不到发布接口
+            所需的 tbCatId（淘宝分类ID）。None 时沿用鱼小铺场景（素材库等无账号能力
+            上下文的入口）。
         Returns:
             包含接口实际返回分类候选的结果字典。
         Raises:
@@ -299,12 +304,22 @@ class PlatformCategoryService:
         if not cookie.strip():
             raise CategoryRecommendationError("闲鱼账号缺少Cookie，请先重新登录账号")
 
+        # 普通卖家与鱼小铺使用不同的发布场景：分类推荐接口必须按账号类型携带对应场景
+        # 与站点标识，否则普通卖家在鱼小铺场景下返回的分类候选不带 tbCatId（淘宝分类ID），
+        # 导致后续发布因「缺少淘宝分类ID」失败。站点标识与个人版发布（xianyu_personal_publisher）
+        # 保持一致。
+        is_personal = is_fish_shop is False
+        publish_scene = "pcMainPublish" if is_personal else "pcBackendPublish"
+        scene = "pcMainPublish" if is_personal else "shopPcPublish"
+        origin = "https://www.goofish.com" if is_personal else "https://seller.goofish.com"
+        referer = "https://www.goofish.com/publish" if is_personal else "https://seller.goofish.com/"
+
         payload = {
             "title": title.strip(),
             "lockCpv": False,
             "multiSKU": False,
-            "publishScene": "pcBackendPublish",
-            "scene": "shopPcPublish",
+            "publishScene": publish_scene,
+            "scene": scene,
             "description": description.strip(),
             "uniqueCode": f"{int(time.time() * 1000)}{account_id[-4:]}",
         }
@@ -355,12 +370,14 @@ class PlatformCategoryService:
                     headers = {
                         "accept": "application/json",
                         "content-type": "application/x-www-form-urlencoded",
-                        "origin": "https://seller.goofish.com",
-                        "referer": "https://seller.goofish.com/",
-                        "idle_site_biz_code": "COMMONPRO",
-                        "idle_user_group_member_id": "",
+                        "origin": origin,
+                        "referer": referer,
                         "cookie": current_cookie,
                     }
+                    if not is_personal:
+                        # 鱼小铺卖家后台专用的站点标识；普通卖家个人版发布不带，否则会被判为越权访问。
+                        headers["idle_site_biz_code"] = "COMMONPRO"
+                        headers["idle_user_group_member_id"] = ""
                     async with client.post(
                         CATEGORY_RECOMMEND_URL,
                         params=params,
@@ -432,8 +449,10 @@ class PlatformCategoryService:
                             raise CategoryRecommendationError("接口未返回可用的商品分类")
                         logger.info(
                             f"分类推荐接口调用成功: account_id={account_id}, "
-                            f"retry_count={retry_count}, candidates={len(candidates)}, "
-                            f"properties={len(properties)}, card_list={len(current_card_list)}"
+                            f"is_personal={is_personal}, retry_count={retry_count}, "
+                            f"candidates={len(candidates)}, properties={len(properties)}, "
+                            f"card_list={len(current_card_list)}, "
+                            f"tb_cat_id_present={sum(1 for c in candidates if c.get('tb_cat_id'))}"
                         )
                         return {
                             "candidates": candidates,

@@ -20,6 +20,8 @@ interface PlatformCategoryRecommenderProps {
   onChange: (patch: Partial<PublishForm>) => void
   categoryLocked?: boolean
   onReselectCategory?: () => void
+  /** 账号是否开通鱼小铺；undefined 时后端沿用鱼小铺场景。普通卖家传 false 走个人版场景。 */
+  isFishShop?: boolean
 }
 
 interface CategorySelectionRequest {
@@ -217,7 +219,7 @@ function selectedProperty(attributes: PlatformMaterialAttribute[], propertyId: s
   return attributes.find((attribute) => attribute.property_id === propertyId)
 }
 
-export function PlatformCategoryRecommender({ form, onChange, categoryLocked = false, onReselectCategory }: PlatformCategoryRecommenderProps) {
+export function PlatformCategoryRecommender({ form, onChange, categoryLocked = false, onReselectCategory, isFishShop }: PlatformCategoryRecommenderProps) {
   const [candidates, setCandidates] = useState<PlatformCategoryCandidate[]>([])
   const [properties, setProperties] = useState<PlatformCategoryProperty[]>([])
   const [cardList, setCardList] = useState<PlatformCategoryCardData[]>([])
@@ -230,7 +232,7 @@ export function PlatformCategoryRecommender({ form, onChange, categoryLocked = f
   useEffect(() => {
     const title = form.title.trim()
     const description = form.description.trim()
-    const key = `${title}\u0000${description}\u0000${form.account_id}\u0000${categoryLocked ? 'locked' : 'recommend'}\u0000${retryNonce}`
+    const key = `${title}\u0000${description}\u0000${form.account_id}\u0000${categoryLocked ? 'locked' : 'recommend'}\u0000${retryNonce}:${isFishShop ? 'fish' : 'personal'}`
     if (inputKeyRef.current === key) return
     inputKeyRef.current = key
     const version = ++requestVersion.current
@@ -269,6 +271,7 @@ export function PlatformCategoryRecommender({ form, onChange, categoryLocked = f
           title: title || description.slice(0, 200),
           description: description || title,
           account_id: form.account_id || undefined,
+          is_fish_shop: isFishShop,
         })
         if (version !== requestVersion.current) return
         if (!response.success || !response.data?.candidates?.length) {
@@ -307,7 +310,7 @@ export function PlatformCategoryRecommender({ form, onChange, categoryLocked = f
       // React 严格模式会立即清理首次副作用；若此时请求尚未发出，允许下一次副作用重新调度。
       if (!requestStarted && inputKeyRef.current === key) inputKeyRef.current = ''
     }
-  }, [form.title, form.description, form.account_id, categoryLocked, retryNonce])
+  }, [form.title, form.description, form.account_id, categoryLocked, isFishShop, retryNonce])
 
   const selectCandidate = async (candidate: PlatformCategoryCandidate) => {
     const title = form.title.trim()
@@ -324,6 +327,7 @@ export function PlatformCategoryRecommender({ form, onChange, categoryLocked = f
         title: title || description.slice(0, 200),
         description: description || title,
         account_id: form.account_id || undefined,
+        is_fish_shop: isFishShop,
         ...selection,
       })
       if (version !== requestVersion.current) return

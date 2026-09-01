@@ -292,6 +292,7 @@ export const recommendPlatformCategory = (params: {
   title: string
   description: string
   account_id?: string
+  is_fish_shop?: boolean
   current_card_list?: PlatformCategoryCardData[]
   selected_list?: Record<string, unknown>[]
   cat_id?: string
