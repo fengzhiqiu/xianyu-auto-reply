@@ -445,7 +445,3 @@ curl -fsSL https://xy-update.zhinianboke.com/deploy.sh | sed 's/\r$//' | bash
 
 感谢这些优秀的开源项目为本项目的开发提供了宝贵的参考和启发！
 
-
-## Star History
-
-[![Star History Chart](https://star-history.dera.page/svg?repos=zhinianboke/xianyu-auto-reply&type=Date)](https://star-history.dera.page/#zhinianboke/xianyu-auto-reply&Date)
