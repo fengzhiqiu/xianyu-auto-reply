@@ -19,6 +19,23 @@ def text(value: Any) -> str:
     return str(value).strip() if value is not None else ""
 
 
+def build_item_text_dto(title: str, description: str) -> dict[str, Any]:
+    """构造标题与正文分离的闲鱼商品文本载荷。
+
+    Args:
+        title: 商品标题。
+        description: 商品正文描述。
+    Returns:
+        dict: 可直接写入发布载荷 ``itemTextDTO`` 的文本配置。
+    """
+    return {
+        "desc": description,
+        "title": title,
+        # 开启后平台分别读取 title 与 desc，避免将正文第一行当作商品标题。
+        "titleDescSeparate": True,
+    }
+
+
 def price_in_cent(value: Any, field_name: str) -> str:
     """将元价格转换为字符串分值。"""
     try:

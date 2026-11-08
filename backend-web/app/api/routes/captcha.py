@@ -14,7 +14,7 @@ import string
 import time
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, Query, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, EmailStr
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -33,10 +33,19 @@ from app.services.remote_captcha_admission_service import (
 from app.services.risk_control_log_service import RiskControlLogService
 from app.services.system_setting_service import SystemSettingService
 from app.services.websocket_client import websocket_client
+from app.core.config import get_settings
 from common.db.session import async_session_maker
 from common.models.system_setting import SystemSetting
 from common.models.user import User
 from common.schemas.common import ApiResponse
+from common.services.email_log_service import (
+    EMAIL_OPERATION_EMAIL_LOGIN_VERIFICATION_CODE,
+    EMAIL_OPERATION_REGISTER_VERIFICATION_CODE,
+    EMAIL_OPERATION_RESET_PASSWORD_VERIFICATION_CODE,
+    record_email_log,
+)
+from common.utils.http_utils import get_client_ip
+from common.utils.internal_auth import build_internal_auth_headers, is_internal_api_url
 
 router = APIRouter(prefix="/captcha", tags=["验证码"])
 
@@ -68,7 +77,7 @@ class SendCodeRequest(BaseModel):
 class SliderSolveRequest(BaseModel):
     """过滑块请求（模式B，外部使用）"""
     secret_key: str                      # 用户个人设置中的秘钥（用于身份校验，查到用户名）
-    account_id: str = ""                 # 外部账号标识（仅用于日志/浏览器实例隔离，本系统不查库）
+    account_id: str = ""                 # 原始账号标识；带Cookie重取Token时关联所属用户配置
     url: str                             # punish 验证链接（punish?x5secdata=...）
     browser_timeout: int = 40            # 单次浏览器超时（秒），范围 20~120
     cookies: str = ""                    # 可选：账号 Cookie（调用方开启"传递Cookie"开关时传入），
@@ -106,7 +115,7 @@ REMOTE_CONFIG_WEIGHT_REMOTE_KEY = "captcha.real_mouse_weight_remote"
 
 # Token获取方式专用域名：这些是取Token的远程接口地址，不属于过滑块远程服务，
 # 误填到风控日志的远程服务URL会导致过滑块一直失败，因此保存时直接拦截。
-TOKEN_API_ONLY_DOMAINS = ("api.xianyusite.shop", "api.zhinianblog.cn")
+TOKEN_API_ONLY_DOMAINS = ("api.xianyushop.shop", "api.xianyusite.shop", "api.zhinianblog.cn")
 
 
 def _check_token_api_domain(url: str) -> Optional[ApiResponse]:
@@ -125,7 +134,7 @@ def _check_token_api_domain(url: str) -> Optional[ApiResponse]:
         if domain in lowered:
             return ApiResponse(
                 success=False,
-                message=f"该URL（{domain}）不是在此处填写，需要在「系统设置-Token获取方式」中填写",
+                message=f"该URL（{domain}）请到「个人设置 → 远程URL配置 → Token获取方式」中填写",
             )
     return None
 
@@ -382,12 +391,24 @@ async def verify_captcha(request: VerifyCaptchaRequest) -> ApiResponse:
 
 @router.post("/send-email-code")
 async def send_email_verification_code(
+    http_request: Request,
     request: SendCodeRequest,
     db: AsyncSession = Depends(deps.get_db_session),
 ) -> ApiResponse:
     """发送邮箱验证码"""
+    # 触发操作枚举与客户端IP，用于邮件发送日志
+    if request.type == "login":
+        trigger_operation = EMAIL_OPERATION_EMAIL_LOGIN_VERIFICATION_CODE
+    elif request.type == "register":
+        trigger_operation = EMAIL_OPERATION_REGISTER_VERIFICATION_CODE
+    else:
+        trigger_operation = EMAIL_OPERATION_RESET_PASSWORD_VERIFICATION_CODE
+    client_ip = get_client_ip(http_request)
+
     try:
         cleanup_expired_email_codes()
+        # 触发用户（用于邮件日志），先置空，后续按类型补充
+        existing_user = None
 
         from app.services.user_service import UserService
         user_service = UserService(db)
@@ -402,16 +423,42 @@ async def send_email_verification_code(
                 from app.api.routes.geetest import check_geetest_verified
 
                 if not request.geetest_challenge:
+                    # 被校验拒绝也必须落库邮件日志
+                    await record_email_log(
+                        recipient_email=request.email,
+                        trigger_operation=trigger_operation,
+                        success=False,
+                        owner_id=None,
+                        client_ip=client_ip,
+                        result_message="请完成滑动验证",
+                    )
                     return ApiResponse(success=False, message="请完成滑动验证")
 
                 geetest_ok, geetest_msg = check_geetest_verified(request.geetest_challenge)
                 if not geetest_ok:
+                    # 被校验拒绝也必须落库邮件日志
+                    await record_email_log(
+                        recipient_email=request.email,
+                        trigger_operation=trigger_operation,
+                        success=False,
+                        owner_id=None,
+                        client_ip=client_ip,
+                        result_message=geetest_msg,
+                    )
                     return ApiResponse(success=False, message=geetest_msg)
 
         # 根据类型检查邮箱
         if request.type == "register":
             existing_user = await user_service.get_by_email(request.email)
             if existing_user:
+                await record_email_log(
+                    recipient_email=request.email,
+                    trigger_operation=trigger_operation,
+                    success=False,
+                    owner_id=existing_user.id,
+                    client_ip=client_ip,
+                    result_message="该邮箱已被注册",
+                )
                 return ApiResponse(
                     success=False,
                     message="该邮箱已被注册"
@@ -419,6 +466,14 @@ async def send_email_verification_code(
         elif request.type == "login":
             existing_user = await user_service.get_by_email(request.email)
             if not existing_user:
+                await record_email_log(
+                    recipient_email=request.email,
+                    trigger_operation=trigger_operation,
+                    success=False,
+                    owner_id=None,
+                    client_ip=client_ip,
+                    result_message="该邮箱未注册",
+                )
                 return ApiResponse(
                     success=False,
                     message="该邮箱未注册"
@@ -426,6 +481,14 @@ async def send_email_verification_code(
         elif request.type == "reset_password":
             existing_user = await user_service.get_by_email(request.email)
             if not existing_user:
+                await record_email_log(
+                    recipient_email=request.email,
+                    trigger_operation=trigger_operation,
+                    success=False,
+                    owner_id=None,
+                    client_ip=client_ip,
+                    result_message="该邮箱未注册",
+                )
                 return ApiResponse(
                     success=False,
                     message="该邮箱未注册"
@@ -434,6 +497,14 @@ async def send_email_verification_code(
         # 检查发送频率（1分钟内只能发送一次）
         stored = email_code_store.get(request.email)
         if stored and stored["expires_at"] - 240 > time.time():
+            await record_email_log(
+                recipient_email=request.email,
+                trigger_operation=trigger_operation,
+                success=False,
+                owner_id=(existing_user.id if existing_user else None),
+                client_ip=client_ip,
+                result_message="验证码发送过于频繁，请稍后再试",
+            )
             return ApiResponse(
                 success=False,
                 message="验证码发送过于频繁，请稍后再试"
@@ -451,7 +522,13 @@ async def send_email_verification_code(
         
         # 发送邮件
         from app.services.email_service import send_verification_code_email
-        success, message = await send_verification_code_email(request.email, code, request.type)
+        success, message = await send_verification_code_email(
+            request.email,
+            code,
+            request.type,
+            owner_id=(existing_user.id if existing_user else None),
+            client_ip=client_ip,
+        )
         
         if not success:
             # 发送失败，删除验证码
@@ -470,6 +547,15 @@ async def send_email_verification_code(
         
     except Exception as e:
         logger.error(f"发送邮箱验证码失败: {e}")
+        # 兜底记录：异常也必须落库邮件日志，禁止静默失败
+        await record_email_log(
+            recipient_email=str(getattr(request, "email", "") or ""),
+            trigger_operation=trigger_operation,
+            success=False,
+            owner_id=None,
+            client_ip=client_ip,
+            result_message=f"发送邮箱验证码异常: {type(e).__name__}: {e}",
+        )
         return ApiResponse(
             success=False,
             message="验证码发送失败，请稍后重试"
@@ -553,7 +639,8 @@ async def slider_solve(
 ) -> ApiResponse:
     """过滑块（供外部系统调用）。
 
-    模式B：仅凭传入的 punish 链接求解，本系统不查账号库、不回填 cookies。
+    模式B：凭 punish 链接求解，不回填账号 Cookie；携带 Cookie 重取 Token 时，
+    已登记账号按所属用户选择配置，未登记的外部标识沿用系统配置。
     - 鉴权：必须传入有效的用户秘钥（个人设置中的秘钥），校验存在即放行，并据此记录调用用户。
     - 成功：data = { engine, cookies: { x5sec, ... } }
     - 失败：success=false
@@ -615,7 +702,7 @@ async def slider_solve(
         return ApiResponse(success=False, message=rejection_message or "远程过滑块调用已拒绝")
 
     result_data = await websocket_client.solve_captcha(
-        account_id=safe_account_id,
+        account_id=raw_account_id,
         url=url,
         browser_timeout=timeout,
         call_type="remote",
@@ -692,14 +779,37 @@ async def test_remote_slider_solve(
         "account_id": "connectivity-test",
         "url": "",  # 故意留空：只测连通+秘钥，不真正过滑块
     }
-    logger.info(f"[过滑块测试] 请求远程服务 url={url} payload={payload}")
+    settings = get_settings()
+    allowed_internal_bases = tuple(
+        value
+        for value in (
+            settings.websocket_service_url,
+            getattr(settings, "scheduler_service_url", ""),
+        )
+        if value
+    )
+    request_headers: dict[str, str] = {}
+    if is_internal_api_url(url, allowed_internal_bases):
+        token = (settings.internal_api_token or "").strip()
+        if token:
+            request_headers = build_internal_auth_headers(token)
+    # 只记录是否提供秘钥和长度，禁止把远程秘钥原文写入日志。
+    logger.info(
+        "[过滑块测试] 请求远程服务 url={} secret_key_present={} secret_key_length={}",
+        url.split("?", 1)[0],
+        bool(payload["secret_key"]),
+        len(payload["secret_key"]),
+    )
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
-            async with session.post(url, json=payload) as resp:
+            async with session.post(url, json=payload, headers=request_headers) as resp:
                 # 打印远程服务原始返回（状态码 + 文本）
                 raw_text = await resp.text()
+                # 远程服务可能回显请求体中的秘钥或 Cookie，日志只保留状态和长度。
                 logger.info(
-                    f"[过滑块测试] 远程响应 status={resp.status} body={raw_text}"
+                    "[过滑块测试] 远程响应 status={} body_length={}",
+                    resp.status,
+                    len(raw_text),
                 )
                 try:
                     body = await resp.json(content_type=None)

@@ -14,16 +14,18 @@ from app.services.xianyu_direct_payload import text as _text
 
 
 def as_bool(value: Any) -> bool:
-    """把平台返回的布尔值（可能是字符串 "true"/"false"）转成 Python 布尔。
+    """把平台或历史调用方返回的布尔值转成 Python 布尔。
 
     Args:
-        value: 平台返回的原始值，可能是布尔或字符串。
+        value: 原始值，可能是布尔、数字或字符串（true/1/yes/on）。
     Returns:
         bool: 仅当值为真布尔 True 或字符串 "true"（忽略大小写）时返回 True。
     """
     if isinstance(value, bool):
         return value
-    return _text(value).lower() == "true"
+    if isinstance(value, (int, float)):
+        return value != 0
+    return _text(value).strip().lower() in {"true", "1", "yes", "on"}
 
 
 def as_int(value: Any, default: int = 0) -> int:
@@ -101,7 +103,11 @@ def shipping_method_from_post_fee(post_fee: Any) -> str:
     """
     if not isinstance(post_fee, dict):
         return "free"
-    if as_bool(post_fee.get("onlyTakeSelf")):
+    # 「无需邮寄」与「支持自提」是两个独立开关：前者由运费能力组合决定，
+    # 后者只由 onlyTakeSelf 决定，不能用自提开关反推发货方式。
+    if not as_bool(post_fee.get("canFreeShipping")) and not as_bool(
+        post_fee.get("supportFreight")
+    ):
         return "none"
     template_id = _text(post_fee.get("templateId")) or _text(post_fee.get("idleTemplateId"))
     if template_id and template_id != "0":
@@ -119,6 +125,30 @@ def snapshot_post_fee_unchanged(item_data: dict[str, Any], snapshot_post_fee: An
         snapshot_post_fee: editdetail 返回的 itemPostFeeDTO。
     Returns:
         bool: 发货方式与运费金额都未改动时返回 True。
+    """
+    if not snapshot_post_fee_shipping_unchanged(item_data, snapshot_post_fee):
+        return False
+    # 自提开关是独立字段，调用方已传入时也必须参与一致性判断。
+    if "support_pickup" in item_data:
+        return as_bool(item_data.get("support_pickup")) == as_bool(
+            snapshot_post_fee.get("onlyTakeSelf")
+        )
+    return True
+
+
+def snapshot_post_fee_shipping_unchanged(
+    item_data: dict[str, Any], snapshot_post_fee: Any
+) -> bool:
+    """判断发货方式与运费金额是否未变，不比较支持自提开关。
+
+    编辑只切换「支持自提」时可据此保留平台原始模板/计费字段，避免用占位
+    模板 ID 重建运费配置。
+
+    Args:
+        item_data: 前端表单数据，读取 shipping_method 与 postage。
+        snapshot_post_fee: editdetail 返回的 itemPostFeeDTO。
+    Returns:
+        bool: 发货方式与运费金额一致时返回 True。
     """
     if not isinstance(snapshot_post_fee, dict):
         return False
@@ -280,6 +310,7 @@ __all__ = [
     "snapshot_address_if_unchanged",
     "snapshot_image_index",
     "snapshot_post_fee_unchanged",
+    "snapshot_post_fee_shipping_unchanged",
     "snapshot_user_rights",
     "snapshot_video_index",
     "snapshot_video_items",

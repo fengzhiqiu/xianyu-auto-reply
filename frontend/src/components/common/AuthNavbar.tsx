@@ -2,12 +2,12 @@
  * 公共页面顶部导航栏组件
  *
  * 用于登录页、注册页、获取激活码、激活码续期等无需登录的页面
- * 包含：首页、获取激活码、激活码续期 三个菜单
+ * 包含：首页、在线安装、获取激活码、激活码续期、获取本地版、获取源码、关于、登录
  * 支持手机端响应式（汉堡菜单）
  */
 import { Link, useLocation } from 'react-router-dom'
 import { useState, useEffect } from 'react'
-import { Home, Key, RefreshCw, Monitor, Menu, X, MessageSquare, Code2, Sun, Moon } from 'lucide-react'
+import { Home, Key, RefreshCw, Monitor, Menu, X, MessageSquare, Code2, Sun, Moon, Info, LogIn, Terminal } from 'lucide-react'
 import { getDefaultLoginBrandingSettings, LOGIN_BRANDING_UPDATED_EVENT } from '@/api/settings'
 import { getLoginBrandingSettings } from '@/api/auth'
 import type { LoginBrandingSettings } from '@/types'
@@ -21,11 +21,13 @@ const isOnlineEnv = () => {
 
 /** 导航菜单项定义 */
 const NAV_ITEMS = [
-  { path: '/login', label: '首页', icon: Home, hideOnLocal: true },
+  { path: '/', label: '首页', icon: Home, hideOnLocal: false },
+  { path: '/online-install', label: '在线安装', icon: Terminal, hideOnLocal: false },
   { path: '/get-activation', label: '获取激活码', icon: Key, hideOnLocal: true },
   { path: '/renew-activation', label: '激活码续期', icon: RefreshCw, hideOnLocal: true },
   { path: '/get-local-version', label: '获取本地版', icon: Monitor, hideOnLocal: true },
   { path: '/get-source-code', label: '获取源码', icon: Code2, hideOnLocal: true },
+  { path: '/about-public', label: '关于', icon: Info, hideOnLocal: false },
 ]
 
 interface AuthNavbarProps {
@@ -113,21 +115,21 @@ export function AuthNavbar({ systemName }: AuthNavbarProps) {
   }
 
   return (
-    <nav className="fixed top-0 left-0 right-0 z-50 bg-white/95 dark:bg-slate-900/95 backdrop-blur-sm border-b border-slate-200 dark:border-slate-700">
+    <nav aria-label="公共导航" className="fixed top-0 left-0 right-0 z-50 bg-white/95 dark:bg-slate-900/95 backdrop-blur-sm border-b border-slate-200 dark:border-slate-700">
       <div className="max-w-7xl mx-auto px-4 sm:px-6">
         <div className="flex items-center justify-between h-14">
           {/* Logo */}
-          <Link to="/login" className="flex items-center gap-2 flex-shrink-0">
-            <div className="w-8 h-8 rounded-lg bg-blue-500 flex items-center justify-center">
+          <Link to="/" aria-label={`${resolvedSystemName}首页`} onClick={() => setMobileMenuOpen(false)} className="flex items-center gap-2 flex-shrink-0">
+            <div className="w-8 h-8 rounded-lg bg-[rgb(var(--color-primary))] flex items-center justify-center">
               <MessageSquare className="w-4 h-4 text-white" />
             </div>
-            <span className="text-sm font-bold text-slate-900 dark:text-white hidden sm:inline">
+            <span className="text-sm font-bold text-slate-900 dark:text-white hidden sm:inline lg:hidden xl:inline">
               {resolvedSystemName}
             </span>
           </Link>
 
           {/* 桌面端菜单 */}
-          <div className="hidden sm:flex items-center gap-1">
+          <div className="hidden lg:flex items-center gap-1">
             {filteredItems.map((item) => {
               const Icon = item.icon
               const isActive = location.pathname === item.path
@@ -136,11 +138,12 @@ export function AuthNavbar({ systemName }: AuthNavbarProps) {
                 <Link
                   key={item.path}
                   to={item.path}
+                  aria-current={isActive ? 'page' : undefined}
                   className={cn(
                     'flex items-center gap-1.5 px-3 py-2 rounded-md text-sm font-medium transition-colors',
                     isActive
-                      ? 'text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-900/30'
-                      : 'text-slate-600 dark:text-slate-300 hover:text-blue-600 dark:hover:text-blue-400 hover:bg-slate-100 dark:hover:bg-slate-800'
+                      ? 'text-[rgb(var(--color-primary))] bg-[rgb(var(--color-primary)/0.1)]'
+                      : 'text-slate-600 dark:text-slate-300 hover:text-[rgb(var(--color-primary))] hover:bg-slate-100 dark:hover:bg-slate-800'
                   )}
                 >
                   <Icon className="w-4 h-4" />
@@ -152,7 +155,11 @@ export function AuthNavbar({ systemName }: AuthNavbarProps) {
 
           {/* 主题切换按钮（桌面和手机端都显示，放在汉堡菜单左侧避免遮挡） */}
           <div className="flex items-center gap-1">
+            <Link to="/login" onClick={() => setMobileMenuOpen(false)} aria-current={location.pathname === '/login' ? 'page' : undefined} className="btn-ios-primary btn-sm">
+              <LogIn className="h-4 w-4" />登录
+            </Link>
             <button
+              type="button"
               onClick={toggleTheme}
               className="p-2 rounded-md text-slate-600 dark:text-slate-300
                          hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
@@ -162,8 +169,11 @@ export function AuthNavbar({ systemName }: AuthNavbarProps) {
             </button>
             {/* 手机端汉堡菜单按钮 */}
             <button
+              type="button"
+              aria-label={mobileMenuOpen ? '关闭导航菜单' : '打开导航菜单'}
+              aria-expanded={mobileMenuOpen}
               onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
-              className="sm:hidden p-2 rounded-md text-slate-600 dark:text-slate-300
+              className="lg:hidden p-2 rounded-md text-slate-600 dark:text-slate-300
                          hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
             >
               {mobileMenuOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
@@ -174,7 +184,7 @@ export function AuthNavbar({ systemName }: AuthNavbarProps) {
 
       {/* 手机端下拉菜单 */}
       {mobileMenuOpen && (
-        <div className="sm:hidden border-t border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900">
+        <div className="lg:hidden border-t border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900">
           <div className="px-3 py-2 space-y-1">
             {filteredItems.map((item) => {
               const Icon = item.icon
@@ -184,12 +194,13 @@ export function AuthNavbar({ systemName }: AuthNavbarProps) {
                 <Link
                   key={item.path}
                   to={item.path}
+                  aria-current={isActive ? 'page' : undefined}
                   onClick={() => setMobileMenuOpen(false)}
                   className={cn(
                     'flex items-center gap-2 px-3 py-2.5 rounded-md text-sm font-medium transition-colors',
                     isActive
-                      ? 'text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-900/30'
-                      : 'text-slate-600 dark:text-slate-300 hover:text-blue-600 dark:hover:text-blue-400 hover:bg-slate-100 dark:hover:bg-slate-800'
+                      ? 'text-[rgb(var(--color-primary))] bg-[rgb(var(--color-primary)/0.1)]'
+                      : 'text-slate-600 dark:text-slate-300 hover:text-[rgb(var(--color-primary))] hover:bg-slate-100 dark:hover:bg-slate-800'
                   )}
                 >
                   <Icon className="w-4 h-4" />

@@ -21,9 +21,12 @@ export interface FetchItemsSummaryResponse extends ApiResponse {
 }
 
 // 获取商品列表
-export const getItems = async (cookieId?: string): Promise<{ success: boolean; data: Item[] }> => {
+export const getItems = async (cookieId?: string): Promise<{ success: boolean; data: Item[]; message?: string }> => {
   const url = cookieId ? `${ITEM_PREFIX}/cookie/${cookieId}` : ITEM_PREFIX
-  const result = await get<{ items?: Item[] } | Item[]>(url)
+  const result = await get<{ items?: Item[]; success?: boolean; message?: string } | Item[]>(url)
+  if (!Array.isArray(result) && result.success === false) {
+    return { success: false, data: [], message: result.message || '商品列表加载失败' }
+  }
   // 后端返回 { items: [...] } 或直接返回数组
   const items = Array.isArray(result) ? result : (result.items || [])
   return { success: true, data: items }
@@ -94,10 +97,30 @@ export interface SelectableItem {
   price?: string | null
 }
 
+export interface SelectableItemsPage {
+  list: SelectableItem[]
+  total: number
+  page: number
+  page_size: number
+  total_pages: number
+  has_more: boolean
+}
+
+// 待选商品专用轻量分页，不获取商品详情、默认回复和卡券状态。
+export const getSelectableItemsPaginated = (
+  page: number = 1,
+  pageSize: number = 20,
+  keyword: string = '',
+): Promise<ApiResponse<SelectableItemsPage>> => {
+  return get(`${ITEM_PREFIX}/selectable/paginated`, {
+    params: { page, page_size: pageSize, keyword: keyword.trim() },
+  })
+}
+
 // 获取全部匹配的可选商品轻量项（供「全选当前筛选结果」）
 export const getAllSelectableItemKeys = (
   keyword: string = ''
-): Promise<{ list: SelectableItem[]; total: number }> => {
+): Promise<{ list: SelectableItem[]; total: number; success?: boolean; message?: string }> => {
   const params = new URLSearchParams()
   if (keyword && keyword.trim()) params.append('keyword', keyword.trim())
   const qs = params.toString()
@@ -107,7 +130,7 @@ export const getAllSelectableItemKeys = (
 // 获取卡券已关联商品的轻量详情（弹窗右侧「已选商品」展示用）
 export const getItemsByCardId = (
   cardId: number
-): Promise<{ list: SelectableItem[]; total: number }> => {
+): Promise<{ list: SelectableItem[]; total: number; success?: boolean; message?: string }> => {
   return get(`${ITEM_PREFIX}/by-card/${cardId}`)
 }
 
@@ -234,6 +257,7 @@ export interface SellerItemEditPayload {
   quantity: number
   address?: string | null
   address_expected_text?: string | null
+  delivery_method: 'express' | 'pickup'
   shipping_method: 'free' | 'distance' | 'fixed' | 'template' | 'none'
   support_pickup: boolean
   postage: number
@@ -268,9 +292,14 @@ export interface ItemDefaultReplyConfig {
   reply_image: string
   enabled: boolean
   reply_once: boolean
-  reply_type?: string  // text-文本，image-图片，api-接口
+  reply_type?: string  // text-文本，image-图片，api-接口，external_contact-站外联系方式
   api_url?: string
   api_timeout?: number
+  location_name?: string
+  location_longitude?: string
+  location_latitude?: string
+  location_title?: string
+  location_subtitle?: string
 }
 
 // 获取商品默认回复配置
@@ -282,7 +311,7 @@ export const getItemDefaultReply = (cookieId: string, itemId: string): Promise<A
 export const saveItemDefaultReply = (
   cookieId: string,
   itemId: string,
-  data: { reply_content: string; reply_image?: string; enabled: boolean; reply_once: boolean; reply_type?: string; api_url?: string; api_timeout?: number }
+  data: { reply_content: string; reply_image?: string; enabled: boolean; reply_once: boolean; reply_type?: string; api_url?: string; api_timeout?: number; location_name?: string; location_longitude?: string; location_latitude?: string; location_title?: string; location_subtitle?: string }
 ): Promise<ApiResponse> => {
   return put(`${ITEM_PREFIX}/${cookieId}/${itemId}/default-reply`, data)
 }
@@ -308,7 +337,7 @@ export const deleteItemDefaultReply = (cookieId: string, itemId: string): Promis
 // 批量保存商品默认回复配置
 export const batchSaveItemDefaultReply = (
   cookieId: string,
-  data: { item_ids: string[]; reply_content: string; reply_image?: string; enabled: boolean; reply_once: boolean; reply_type?: string; api_url?: string; api_timeout?: number }
+  data: { item_ids: string[]; reply_content: string; reply_image?: string; enabled: boolean; reply_once: boolean; reply_type?: string; api_url?: string; api_timeout?: number; location_name?: string; location_longitude?: string; location_latitude?: string; location_title?: string; location_subtitle?: string }
 ): Promise<ApiResponse> => {
   return post(`${ITEM_PREFIX}/${cookieId}/batch-default-reply`, data)
 }

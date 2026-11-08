@@ -23,6 +23,7 @@ from loguru import logger
 
 from app.services.xianyu_direct_payload import text as _text
 from app.services.xianyu_item_snapshot import (
+    as_bool,
     as_int,
     shipping_method_from_post_fee,
 )
@@ -341,8 +342,9 @@ def map_edit_detail_to_form(detail: dict[str, Any]) -> dict[str, Any]:
         "address_expected_text": _text(addr_dto.get("poiName")),
         "shipping_method": shipping_method,
         "postage": round(as_int(post_fee.get("postPriceInCent")) / 100, 2),
-        "support_pickup": shipping_method == "none",
-        "delivery_method": "express",
+        # 支持自提是平台独立字段，不能用「无需邮寄」发货方式代替。
+        "support_pickup": as_bool(post_fee.get("onlyTakeSelf")),
+        "delivery_method": "pickup" if shipping_method == "none" else "express",
         "condition": condition,
         "brand": brand,
     }

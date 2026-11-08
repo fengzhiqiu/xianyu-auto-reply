@@ -10,9 +10,11 @@ from typing import Callable, Dict, Optional, Tuple
 
 from loguru import logger
 
+from common.core.config import get_settings
 from common.services.captcha.slider_stealth import run_slider_verification, CAPTCHA_NOT_REQUIRED, URL_EXPIRED
 from common.services.captcha.remote_timeout import get_remote_solve_timeout
 from common.services.captcha.slider_mode import is_real_mouse_slider_mode
+from common.utils.internal_auth import build_internal_auth_headers, is_internal_api_url
 
 
 def _has_x5sec(cookies: Optional[Dict[str, str]]) -> bool:
@@ -73,9 +75,24 @@ def _call_remote_solve(
         payload["device_id"] = device_id or ""
 
     try:
+        settings = get_settings()
+        allowed_internal_bases = tuple(
+            value
+            for value in (
+                getattr(settings, "websocket_service_url", ""),
+                getattr(settings, "backend_web_service_url", ""),
+                getattr(settings, "scheduler_service_url", ""),
+            )
+            if value
+        )
+        headers = {}
+        token = (getattr(settings, "internal_api_token", "") or "").strip()
+        if token and is_internal_api_url(remote_url, allowed_internal_bases):
+            headers = build_internal_auth_headers(token)
         resp = requests.post(
             remote_url,
             json=payload,
+            headers=headers,
             # 连接 8s 内必须建立，读取给足远程求解时间；超时/连不上 → 回退本机
             timeout=(8, get_remote_solve_timeout(browser_timeout)),
         )

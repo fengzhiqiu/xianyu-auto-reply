@@ -17,12 +17,14 @@ from loguru import logger
 
 from app.services.xianyu_direct_payload import (
     DirectPublishError,
+    build_item_text_dto,
     extract_item_id_from_url,
     find_item_reference,
     price_in_cent,
     text,
 )
 from app.services.xianyu_item_payload_builder import _build_attribute_labels, _resolve_item_address
+from app.services.xianyu_item_snapshot import as_bool
 from common.services.xianyu_mtop import mtop_call
 from common.services.xianyu_publish_media import PublishMediaError, upload_publish_image
 from common.services.xianyu_publish_video import PublishVideoError, upload_publish_videos
@@ -37,7 +39,7 @@ PUBLISH_REFERER = "https://www.goofish.com/publish"
 def _build_personal_post_fee(item_data: dict[str, Any]) -> dict[str, Any]:
     """按普通卖家网页发布组件的字段规则构造发货配置。"""
     shipping_method = text(item_data.get("shipping_method")) or "free"
-    only_take_self = bool(item_data.get("support_pickup"))
+    only_take_self = as_bool(item_data.get("support_pickup"))
     if shipping_method == "free":
         return {"canFreeShipping": True, "supportFreight": True, "onlyTakeSelf": only_take_self}
     if shipping_method == "distance":
@@ -111,13 +113,6 @@ class XianyuPersonalPublisher:
             "channelCatId": text(item_data.get("platform_channel_category_id")),
             "tbCatId": text(item_data.get("platform_tb_category_id")),
         }
-        missing_fields = [field for field in ("catId", "channelCatId", "tbCatId") if not category_info[field]]
-        if missing_fields:
-            names = {"catId": "末级分类ID", "channelCatId": "频道分类ID", "tbCatId": "淘宝分类ID"}
-            raise DirectPublishError(
-                "平台商品分类信息不完整，缺少 "
-                f"{', '.join(names[field] for field in missing_fields)}，请重新选择分类"
-            )
         resolved_address = await _resolve_item_address(item_data)
         video_items: list[dict[str, Any]] = []
         if item_data.get("videos"):
@@ -156,7 +151,7 @@ class XianyuPersonalPublisher:
             "quantity": "1",
             "simpleItem": "true",
             "imageInfoDOList": video_items + image_items,
-            "itemTextDTO": {"desc": description, "title": title, "titleDescSeparate": False},
+            "itemTextDTO": build_item_text_dto(title, description),
             "itemLabelExtList": labels,
             "itemPriceDTO": {
                 "origPriceInCent": price_in_cent(
@@ -197,6 +192,7 @@ class XianyuPersonalPublisher:
                 "item_url": None,
                 "account_invalid": bool(response.get("account_invalid")),
                 "cookies_str": response.get("cookies_str") or cookie,
+                "_request_status_unknown": bool(response.get("_request_status_unknown")),
             }
 
         item_id, item_url = find_item_reference(response.get("res"))
