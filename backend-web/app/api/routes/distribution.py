@@ -511,16 +511,18 @@ async def get_fund_flows(
     page_size: int = Query(default=20, ge=1, le=100, description="每页数量"),
     flow_type: str = Query(default="", alias="type", description="流水类型：income/expense"),
     username: str = Query(default="", description="用户名模糊筛选（仅管理员生效）"),
+    description: str = Query(default="", max_length=500, description="流水描述模糊筛选"),
     current_user: User = Depends(deps.get_current_active_user),
     service: FundFlowService = Depends(get_fund_flow_service),
 ):
-    """获取资金流水列表，管理员可查看所有并可按用户名筛选"""
+    """获取资金流水列表，支持按描述模糊筛选，管理员还可按用户名筛选"""
     user_id, is_admin = resolve_owner_scope(current_user)
     result = await service.get_fund_flows_paginated(
         user_id=user_id,
         flow_type=flow_type,
         # 用户名筛选仅对管理员生效，普通用户已被 user_id 限定为本人
         username=username if is_admin else "",
+        description=description,
         page=page,
         page_size=page_size,
     )

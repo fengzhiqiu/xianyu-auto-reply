@@ -11,121 +11,52 @@
 import functools
 import http.server
 import os
-import signal
+import secrets
 import subprocess
 import sys
 import threading
 import time
 import urllib.request
+import urllib.error
 from pathlib import Path
 
+from launcher.frontend_handler import FrontendHandler
+from launcher.browser_setup import ensure_playwright_browser_path
 from launcher.process_utils import kill_process_tree, kill_by_port, check_port
-from launcher.frozen_detect import is_frozen, get_project_root
+from launcher.frozen_detect import is_frozen
 from typing import Optional
 
 
-# 前端代理目标配置
-# 注意：/static/uploads/ 代理到后端（上传文件），其余/static/由前端静态服务器直接提供
-_PROXY_RULES = {
-    "/api/": "http://127.0.0.1:8089",
-    "/static/uploads/": "http://127.0.0.1:8089",
+# 本地启动器生成 .env 时统一写入的 Redis 连接池参数。
+_REDIS_POOL_ENV = (
+    "REDIS_POOL_SIZE=800\n"
+    "REDIS_SOCKET_TIMEOUT=5\n"
+    "REDIS_SOCKET_CONNECT_TIMEOUT=3\n"
+    "REDIS_SOCKET_KEEPALIVE=true\n"
+    "REDIS_SOCKET_KEEPALIVE_IDLE=60\n"
+    "REDIS_SOCKET_KEEPALIVE_INTERVAL=10\n"
+    "REDIS_SOCKET_KEEPALIVE_COUNT=3\n"
+    "REDIS_HEALTH_CHECK_INTERVAL=30\n"
+    "REDIS_PROTOCOL=2\n"
+    "REDIS_STARTUP_MAX_RETRIES=5\n"
+    "REDIS_STARTUP_RETRY_BASE_DELAY=1\n"
+    "REDIS_STARTUP_RETRY_CAP_DELAY=10\n"
+)
+
+# 本地启动器按服务写入数据库连接池参数，避免落到各服务不同的代码默认值
+_DB_POOL_COMMON_ENV = (
+    "DB_POOL_SIZE=800\n"
+    "DB_POOL_TIMEOUT=30\n"
+    "DB_POOL_RECYCLE=1800\n"
+    "DB_POOL_PRE_PING=true\n"
+    "DB_POOL_USE_LIFO=true\n"
+    "DB_CONNECT_TIMEOUT=10\n"
+)
+_DB_POOL_SERVICE_ENV = {
+    "backend-web": "DB_MAX_OVERFLOW=60\n",
+    "websocket": "DB_MAX_OVERFLOW=150\n",
+    "scheduler": "DB_MAX_OVERFLOW=30\n",
 }
-
-
-class FrontendHandler(http.server.SimpleHTTPRequestHandler):
-    """
-    前端静态文件服务器请求处理器
-    
-    功能：
-    1. 托管前端dist目录的静态文件
-    2. 对/api/和/static/请求代理到后端服务
-    3. 对SPA路由返回index.html（Vue/React路由兼容）
-    """
-    
-    def __init__(self, *args, dist_dir: str = "", **kwargs):
-        """初始化，设置dist目录"""
-        self._dist_dir = dist_dir
-        super().__init__(*args, directory=dist_dir, **kwargs)
-    
-    def do_GET(self):
-        """处理GET请求，支持代理和SPA路由回退"""
-        # 检查是否需要代理
-        for prefix, target in _PROXY_RULES.items():
-            if self.path.startswith(prefix):
-                self._proxy_request(target)
-                return
-        
-        # 检查静态文件是否存在，不存在则回退到index.html（SPA路由）
-        file_path = Path(self._dist_dir) / self.path.lstrip("/").split("?")[0]
-        if not file_path.exists() and not file_path.suffix:
-            self.path = "/index.html"
-        
-        super().do_GET()
-    
-    def do_POST(self):
-        """处理POST请求，代理到后端"""
-        for prefix, target in _PROXY_RULES.items():
-            if self.path.startswith(prefix):
-                self._proxy_request(target)
-                return
-        self.send_error(404)
-    
-    def do_PUT(self):
-        """处理PUT请求，代理到后端"""
-        for prefix, target in _PROXY_RULES.items():
-            if self.path.startswith(prefix):
-                self._proxy_request(target)
-                return
-        self.send_error(404)
-    
-    def do_DELETE(self):
-        """处理DELETE请求，代理到后端"""
-        for prefix, target in _PROXY_RULES.items():
-            if self.path.startswith(prefix):
-                self._proxy_request(target)
-                return
-        self.send_error(404)
-    
-    def _proxy_request(self, target_base: str):
-        """
-        将请求代理到后端服务
-        
-        Args:
-            target_base: 后端服务基地址，如 http://127.0.0.1:8089
-        """
-        try:
-            target_url = f"{target_base}{self.path}"
-            
-            # 读取请求体
-            content_length = int(self.headers.get("Content-Length", 0))
-            body = self.rfile.read(content_length) if content_length > 0 else None
-            
-            # 构建代理请求
-            req = urllib.request.Request(target_url, data=body, method=self.command)
-            
-            # 复制请求头（排除Host）
-            for header, value in self.headers.items():
-                if header.lower() not in ("host", "content-length"):
-                    req.add_header(header, value)
-            
-            # 发送请求
-            with urllib.request.urlopen(req, timeout=90) as resp:
-                self.send_response(resp.status)
-                for header, value in resp.getheaders():
-                    if header.lower() not in ("transfer-encoding",):
-                        self.send_header(header, value)
-                self.end_headers()
-                self.wfile.write(resp.read())
-        except Exception as e:
-            self.send_response(502)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.end_headers()
-            error_msg = f'{{"success":false,"code":502,"message":"代理请求失败: {str(e)}","data":null}}'
-            self.wfile.write(error_msg.encode("utf-8"))
-    
-    def log_message(self, format, *args):
-        """抑制日志输出，避免控制台刷屏"""
-        pass
 
 
 class ServiceManager:
@@ -187,6 +118,7 @@ class ServiceManager:
         # 数据库备份目录：backend-web 与 scheduler 必须指向同一绝对路径，
         # 否则 scheduler 写入的备份文件 backend-web 无法读取下载（本地源码模式各服务 cwd 不同）
         backup_dir = (self.project_root / "backups").as_posix()
+        internal_api_token = config.get("internal_api_token") or secrets.token_urlsafe(32)
 
         # backend-web .env
         backend_env = (
@@ -197,14 +129,21 @@ class ServiceManager:
             f"MYSQL_USER={config['mysql_user']}\n"
             f"MYSQL_PASSWORD={config['mysql_password']}\n"
             f"MYSQL_DATABASE={config['mysql_database']}\n"
+            f"{_DB_POOL_SERVICE_ENV['backend-web']}"
+            f"{_DB_POOL_COMMON_ENV}"
             f"REDIS_HOST={config['redis_host']}\n"
             f"REDIS_PORT={config['redis_port']}\n"
             f"REDIS_PASSWORD={config['redis_password']}\n"
             f"REDIS_DB={config['redis_db']}\n"
+            f"{_REDIS_POOL_ENV}"
             f"BACKEND_WEB_PORT=8089\n"
+            f"ONLINE_INSTALL_CONNECT_TIMEOUT={config.get('online_install_connect_timeout', 60)}\n"
+            f"ONLINE_INSTALL_TIMEOUT={config.get('online_install_timeout', 7200)}\n"
+            f"ONLINE_INSTALL_RETENTION_SECONDS={config.get('online_install_retention_seconds', 86400)}\n"
             f"JWT_ALGORITHM=HS256\n"
-            f"ACCESS_TOKEN_EXPIRE_MINUTES=30\n"
+            f"ACCESS_TOKEN_EXPIRE_MINUTES=1440\n"
             f"REFRESH_TOKEN_EXPIRE_MINUTES=10080\n"
+            f"INTERNAL_API_TOKEN={internal_api_token}\n"
             f"CORS_ORIGINS=*\n"
             f"WEBSOCKET_SERVICE_URL=http://127.0.0.1:8090\n"
             f"SCHEDULER_SERVICE_URL=http://127.0.0.1:8091\n"
@@ -223,16 +162,20 @@ class ServiceManager:
             f"MYSQL_USER={config['mysql_user']}\n"
             f"MYSQL_PASSWORD={config['mysql_password']}\n"
             f"MYSQL_DATABASE={config['mysql_database']}\n"
+            f"{_DB_POOL_SERVICE_ENV['websocket']}"
+            f"{_DB_POOL_COMMON_ENV}"
             f"REDIS_HOST={config['redis_host']}\n"
             f"REDIS_PORT={config['redis_port']}\n"
             f"REDIS_PASSWORD={config['redis_password']}\n"
             f"REDIS_DB={config['redis_db']}\n"
+            f"{_REDIS_POOL_ENV}"
             f"WEBSOCKET_PORT=8090\n"
             f"MAX_CAPTCHA_CONCURRENT=1\n"
             f"BROWSER_HEADLESS=true\n"
             f"TOKEN_REFRESH_INTERVAL=72000\n"
             f"TOKEN_RETRY_INTERVAL=7200\n"
             f"BACKEND_WEB_SERVICE_URL=http://127.0.0.1:8089\n"
+            f"INTERNAL_API_TOKEN={internal_api_token}\n"
             f"STATIC_DIR=static\n"
         )
         
@@ -245,10 +188,13 @@ class ServiceManager:
             f"MYSQL_USER={config['mysql_user']}\n"
             f"MYSQL_PASSWORD={config['mysql_password']}\n"
             f"MYSQL_DATABASE={config['mysql_database']}\n"
+            f"{_DB_POOL_SERVICE_ENV['scheduler']}"
+            f"{_DB_POOL_COMMON_ENV}"
             f"REDIS_HOST={config['redis_host']}\n"
             f"REDIS_PORT={config['redis_port']}\n"
             f"REDIS_PASSWORD={config['redis_password']}\n"
             f"REDIS_DB={config['redis_db']}\n"
+            f"{_REDIS_POOL_ENV}"
             f"SCHEDULER_PORT=8091\n"
             f"REDELIVERY_INTERVAL=5\n"
             f"RATE_INTERVAL=20\n"
@@ -256,6 +202,7 @@ class ServiceManager:
             f"BACKEND_WEB_SERVICE_URL=http://127.0.0.1:8089\n"
             f"STATIC_DIR=static\n"
             f"BACKUP_DIR={backup_dir}\n"
+            f"INTERNAL_API_TOKEN={internal_api_token}\n"
         )
         
         env_map = {
@@ -302,7 +249,6 @@ class ServiceManager:
             env["PYTHONPATH"] = str(self.project_root)
             # 确保使用UTF-8编码
             env["PYTHONIOENCODING"] = "utf-8"
-            from launcher.browser_setup import ensure_playwright_browser_path
             browser_dir = ensure_playwright_browser_path()
             if browser_dir:
                 env["PLAYWRIGHT_BROWSERS_PATH"] = str(browser_dir)
@@ -399,7 +345,7 @@ class ServiceManager:
             """在子线程中运行静态文件服务器"""
             try:
                 handler = functools.partial(FrontendHandler, dist_dir=dist_dir_str)
-                self._frontend_server = http.server.HTTPServer(
+                self._frontend_server = http.server.ThreadingHTTPServer(
                     ("0.0.0.0", port), handler
                 )
                 self._frontend_server.serve_forever()
@@ -422,8 +368,6 @@ class ServiceManager:
         Returns:
             各服务启动状态字典
         """
-        import urllib.request
-        import urllib.error
         
         # 先生成.env配置文件
         self.generate_env_files(config)

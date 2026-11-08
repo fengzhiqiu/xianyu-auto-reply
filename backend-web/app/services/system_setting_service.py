@@ -9,12 +9,13 @@
 """
 from __future__ import annotations
 
-from typing import Dict
-
+from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from common.models.system_setting import SystemSetting
+from common.services.advertisement_types import AD_PRICE_DEFAULTS, parse_ad_price
+from app.services.payment_config_service import PAYMENT_SETTING_DEFAULTS
 from common.services.remote_token_api import (
     TOKEN_REMOTE_SECRET_KEY_SETTING_KEY,
     TOKEN_REMOTE_URL_SETTING_KEY,
@@ -25,7 +26,13 @@ from common.services.token_api_mode import (
 )
 from common.utils.text_utils import escape_xss
 
-SENSITIVE_KEYS = {"admin_password_hash"}
+# 敏感配置不通过通用系统设置接口返回或修改。
+# 服务间令牌由启动流程自动维护，避免在管理页面暴露或被误改。
+SENSITIVE_KEYS = {
+    "admin_password_hash",
+    "security.internal_api_token",
+    "security.jwt_secret_key",
+}
 
 DEFAULT_DISCLAIMER_CONTENT = (
     "数据存储说明\n"
@@ -47,6 +54,8 @@ DEFAULT_LOGIN_SYSTEM_DESCRIPTION = "自动回复、智能客服、订单管理�
 DEFAULT_AUTH_FOOTER_AD_HTML = "© 2026 划算云服务器 ·<a href=\"http://www.hsykj.com\" target=\"_BLANK\">www.hsykj.com</a>"
 
 DEFAULT_SYSTEM_SETTINGS: dict[str, tuple[str, str | None]] = {
+    **AD_PRICE_DEFAULTS,
+    **PAYMENT_SETTING_DEFAULTS,
     "disclaimer.title": ("免责声明", "系统免责声明标题"),
     "disclaimer.content": (DEFAULT_DISCLAIMER_CONTENT, "系统免责声明正文"),
     "disclaimer.checkbox_text": ("我已阅读并同意以上免责声明", "免责声明勾选提示文案"),
@@ -95,7 +104,7 @@ DEFAULT_SYSTEM_SETTINGS: dict[str, tuple[str, str | None]] = {
 # 不需要XSS转义的键（布尔值、数字等）
 NO_ESCAPE_KEYS = {
     "registration_enabled",
-    "show_default_login_info", 
+    "show_default_login_info",
     "login_captcha_enabled",
     "disclaimer.title",
     "disclaimer.content",
@@ -120,8 +129,17 @@ NO_ESCAPE_KEYS = {
     "alipay.alipay_public_key",
     "alipay.gateway_url",
     "alipay.notify_url",
+    "payment.channel",
+    "zzcode.pid",
+    "zzcode.key",
+    "zzcode.gateway",
+    "zzcode.notify_url",
+    "zzcode.return_url",
+    "zzcode.pay_types",
     "ad_price.carousel",
     "ad_price.text",
+    "ad_price.home_carousel",
+    "ad_price.home_text",
     "withdraw.notify_email",
     "withdraw.min_amount",
     "log.retention_days",
@@ -156,6 +174,8 @@ NO_ESCAPE_KEYS = {
     # Token远程接口配置：URL 和秘钥不能被 XSS 转义
     TOKEN_REMOTE_URL_SETTING_KEY,
     TOKEN_REMOTE_SECRET_KEY_SETTING_KEY,
+    # 服务间令牌不会经由通用设置接口写入；加入免转义集合，防止内部维护时被破坏。
+    "security.internal_api_token",
 }
 
 
@@ -164,6 +184,17 @@ class SystemSettingService:
 
     def __init__(self, session: AsyncSession):
         self.session = session
+
+    async def rollback(self) -> None:
+        """尽力回滚当前会话；回滚失败时记录异常并交由会话关闭释放连接。"""
+        try:
+            await self.session.rollback()
+        except Exception as exc:  # noqa: BLE001 - 回滚失败不能覆盖原始业务异常。
+            logger.opt(exception=exc).error(
+                "系统设置数据库会话回滚失败：exception_type={} exception={}",
+                type(exc).__name__,
+                exc,
+            )
 
     async def ensure_default_settings(self) -> None:
         existing_stmt = select(SystemSetting.key).where(SystemSetting.key.in_(tuple(DEFAULT_SYSTEM_SETTINGS.keys())))
@@ -182,12 +213,15 @@ class SystemSettingService:
         self.session.add_all(missing_records)
         await self.session.commit()
 
-    async def list_settings(self, include_sensitive: bool = False) -> Dict[str, str]:
+    async def list_settings(self, include_sensitive: bool = False) -> dict[str, str]:
         await self.ensure_default_settings()
         stmt = select(SystemSetting)
         result = await self.session.execute(stmt)
-        settings: Dict[str, str] = {}
+        settings: dict[str, str] = {}
         for entry in result.scalars().all():
+            # JWT 密钥和服务间令牌即使内部调用 include_sensitive=True 也不返回。
+            if entry.key in {"security.internal_api_token", "security.jwt_secret_key"}:
+                continue
             if not include_sensitive and entry.key in SENSITIVE_KEYS:
                 continue
             settings[entry.key] = entry.value
@@ -208,25 +242,39 @@ class SystemSettingService:
         return settings
 
     async def set_setting(self, key: str, value: str, description: str | None = None) -> None:
-        stmt = select(SystemSetting).where(SystemSetting.key == key)
-        result = await self.session.execute(stmt)
-        record = result.scalars().first()
+        if key in SENSITIVE_KEYS:
+            raise ValueError("敏感设置不能通过通用接口修改")
+        if key in AD_PRICE_DEFAULTS:
+            parse_ad_price(value)
+        try:
+            stmt = select(SystemSetting).where(SystemSetting.key == key)
+            result = await self.session.execute(stmt)
+            record = result.scalars().first()
 
-        # 对非特殊键的值进行XSS转义
-        safe_value = value if key in NO_ESCAPE_KEYS else escape_xss(value)
-        safe_description = escape_xss(description) if description else None
+            # 对非特殊键的值进行XSS转义
+            safe_value = value if key in NO_ESCAPE_KEYS else escape_xss(value)
+            safe_description = escape_xss(description) if description else None
 
-        if record:
-            record.value = safe_value
-            if description is not None:
-                record.description = safe_description
-        else:
-            record = SystemSetting(key=key, value=safe_value, description=safe_description)
+            if record:
+                record.value = safe_value
+                if description is not None:
+                    record.description = safe_description
+            else:
+                record = SystemSetting(key=key, value=safe_value, description=safe_description)
 
-        self.session.add(record)
-        await self.session.commit()
+            self.session.add(record)
+            await self.session.commit()
+        except Exception as exc:
+            await self.rollback()
+            logger.opt(exception=exc).error(
+                "保存系统设置失败：key={} exception_type={} exception={}",
+                key,
+                type(exc).__name__,
+                exc,
+            )
+            raise
 
-    async def set_settings(self, settings: Dict[str, tuple[str, str | None]]) -> None:
+    async def set_settings(self, settings: dict[str, tuple[str, str | None]]) -> None:
         """在同一事务中批量保存系统设置。
 
         Args:
@@ -238,24 +286,41 @@ class SystemSettingService:
         if not settings:
             return
 
-        stmt = select(SystemSetting).where(SystemSetting.key.in_(tuple(settings.keys())))
-        result = await self.session.execute(stmt)
-        records = {record.key: record for record in result.scalars().all()}
+        sensitive_keys = set(settings).intersection(SENSITIVE_KEYS)
+        if sensitive_keys:
+            raise ValueError("敏感设置不能通过通用接口修改")
+        for key, (value, _) in settings.items():
+            if key in AD_PRICE_DEFAULTS:
+                parse_ad_price(value)
 
-        for key, (value, description) in settings.items():
-            safe_value = value if key in NO_ESCAPE_KEYS else escape_xss(value)
-            safe_description = escape_xss(description) if description else None
-            record = records.get(key)
-            if record:
-                record.value = safe_value
-                if description is not None:
-                    record.description = safe_description
-            else:
-                record = SystemSetting(
-                    key=key,
-                    value=safe_value,
-                    description=safe_description,
-                )
-            self.session.add(record)
+        try:
+            stmt = select(SystemSetting).where(SystemSetting.key.in_(tuple(settings.keys())))
+            result = await self.session.execute(stmt)
+            records = {record.key: record for record in result.scalars().all()}
 
-        await self.session.commit()
+            for key, (value, description) in settings.items():
+                safe_value = value if key in NO_ESCAPE_KEYS else escape_xss(value)
+                safe_description = escape_xss(description) if description else None
+                record = records.get(key)
+                if record:
+                    record.value = safe_value
+                    if description is not None:
+                        record.description = safe_description
+                else:
+                    record = SystemSetting(
+                        key=key,
+                        value=safe_value,
+                        description=safe_description,
+                    )
+                self.session.add(record)
+
+            await self.session.commit()
+        except Exception as exc:
+            await self.rollback()
+            logger.opt(exception=exc).error(
+                "批量保存系统设置失败：keys={} exception_type={} exception={}",
+                sorted(settings),
+                type(exc).__name__,
+                exc,
+            )
+            raise

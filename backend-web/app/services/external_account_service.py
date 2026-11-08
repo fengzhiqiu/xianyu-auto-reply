@@ -13,7 +13,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from common.models.user import User
+from common.models.user import User, UserStatus
 from common.models.xy_account import XYAccount
 
 
@@ -55,9 +55,20 @@ class ExternalAccountService:
         Returns:
             秘钥不存在时返回 None，否则返回用户 ID。
         """
+        user = (
+            await self.session.execute(
+                select(User).where(User.secret_key == secret_key.strip()).limit(1)
+            )
+        ).scalar_one_or_none()
+        if user is None or user.status == UserStatus.DELETED:
+            return None
+        return user.id
+
+    async def get_user_by_secret(self, secret_key: str) -> User | None:
+        """根据分销秘钥获取用户对象，未找到时返回 ``None``。"""
         return (
             await self.session.execute(
-                select(User.id).where(User.secret_key == secret_key.strip()).limit(1)
+                select(User).where(User.secret_key == secret_key.strip()).limit(1)
             )
         ).scalar_one_or_none()
 

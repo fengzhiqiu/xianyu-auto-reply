@@ -12,7 +12,7 @@ from typing import Any
 
 from fastapi import APIRouter, Body, Depends, File, Form, UploadFile
 from loguru import logger
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db_session
@@ -96,7 +96,17 @@ class ExternalPublishSingleRequest(BaseModel):
     sku_rows: list[ExternalSkuRowRequest] = Field(default_factory=list, max_length=200)
     address: str | None = Field(default=None, max_length=200)
     address_expected_text: str | None = Field(default=None, max_length=200)
-    shipping_method: str = Field(default="free", pattern="^(free|none)$")
+    delivery_method: str = Field(default="express", pattern="^(express|pickup)$")
+    shipping_method: str = Field(default="free", pattern="^(free|distance|fixed|template|none)$")
+    # 「支持自提」是独立于「无需邮寄」的发布开关。
+    support_pickup: bool = False
+    postage: float = Field(default=0, ge=0, le=1000)
+
+    @model_validator(mode="after")
+    def normalize_delivery_method(self) -> "ExternalPublishSingleRequest":
+        """以 shipping_method 为实际发布依据，避免公开调用传入矛盾字段。"""
+        self.delivery_method = "pickup" if self.shipping_method == "none" else "express"
+        return self
 
 
 def _build_publish_item_data(
@@ -163,7 +173,10 @@ def _build_publish_item_data(
         "sku_rows": [item.model_dump() for item in payload.sku_rows],
         "address": normalize_text(payload.address),
         "address_expected_text": normalize_text(payload.address_expected_text),
+        "delivery_method": payload.delivery_method,
         "shipping_method": payload.shipping_method,
+        "support_pickup": payload.support_pickup,
+        "postage": payload.postage,
     }
 
 

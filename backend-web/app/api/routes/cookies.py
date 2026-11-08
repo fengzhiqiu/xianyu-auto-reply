@@ -44,7 +44,7 @@ from common.schemas.account import (
 )
 from common.schemas.common import ApiResponse
 from common.services.ai_provider_service import read_ai_enabled
-from common.services.token_renewal_cache_service import mark_token_cache_expired
+from common.services.token_renewal_cache_service import delete_token_cache
 from common.utils.auth_scope import resolve_owner_scope
 from common.utils.xianyu_utils import close_account_notice
 from app.services.account_service import AccountService
@@ -350,6 +350,7 @@ async def list_cookie_details_paginated(
             "only_send_card": bool(account.only_send_card),
             "auto_red_flower": bool(account.auto_red_flower),
             "ai_reply_block_ordered_users": bool(account.ai_reply_block_ordered_users),
+            "agree_deliver_enabled": bool(account.agree_deliver_enabled),
             "delivery_disabled": bool(account.delivery_disabled),
             "delivery_disabled_reason": account.delivery_disabled_reason or "",
             "auto_close_order": bool(account.auto_close_order),
@@ -634,12 +635,11 @@ async def clear_token_cache_batch(
             continue
 
         try:
-            # 1. 标记Token缓存失效（WebSocket侧 user_id=unb，聊天侧 user_id=chat_unb）
+            # 1. 删除Token缓存（WebSocket侧 user_id=unb，聊天侧 user_id=chat_unb）
             invalidation_messages: list[str] = []
             for token_user_id in (unb, f"chat_{unb}"):
-                invalidation = await mark_token_cache_expired(
+                invalidation = await delete_token_cache(
                     token_user_id=token_user_id,
-                    invalidate_valid_cache=True,
                 )
                 if not invalidation.success:
                     raise RuntimeError(invalidation.message)

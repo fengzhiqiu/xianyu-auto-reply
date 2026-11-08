@@ -19,15 +19,18 @@ from typing import Any
 from app.services.amap_inputtips_service import AmapInputTipsError, AmapInputTipsService
 from app.services.xianyu_direct_payload import (
     DirectPublishError,
+    build_item_text_dto as _build_item_text_dto,
     build_sku_payload as _build_sku_payload,
     price_in_cent as _price_in_cent,
     text as _text,
 )
 from app.services.xianyu_item_snapshot import (
     as_int,
+    as_bool,
     normalize_snapshot_post_fee,
     snapshot_address_if_unchanged,
     snapshot_image_index,
+    snapshot_post_fee_shipping_unchanged,
     snapshot_post_fee_unchanged,
     snapshot_user_rights,
     snapshot_video_index,
@@ -104,23 +107,8 @@ def _build_category_label(item_data: dict[str, Any]) -> dict[str, Any]:
     """构造抓包中的分类属性标签，确保平台分类和分类ID一同提交。"""
     channel_id = _text(item_data.get("platform_channel_category_id"))
     category_name = _text(item_data.get("platform_category_name"))
-    # 频道分类名称允许缺失：推荐接口的部分候选不带 channelCatName，此时用末级分类名称兜底，
-    # 与编辑映射（xianyu_item_edit_mapper）和分类选择构造（platform_category_selection）保持一致。
     channel_name = _text(item_data.get("platform_channel_category_name")) or category_name
     tb_cat_id = _text(item_data.get("platform_tb_category_id"))
-    if not channel_id or not channel_name or not tb_cat_id:
-        missing = [
-            name
-            for name, value in (
-                ("频道分类ID", channel_id),
-                ("分类名称", channel_name),
-                ("淘宝分类ID", tb_cat_id),
-            )
-            if not value
-        ]
-        raise DirectPublishError(
-            "平台商品分类信息不完整，缺少 " + "、".join(missing) + "，请重新选择完整的平台商品分类"
-        )
     return {
         "channelCateName": channel_name,
         "valueId": None,
@@ -179,14 +167,51 @@ def _build_attribute_labels(item_data: dict[str, Any]) -> list[dict[str, Any]]:
     return labels
 
 
-def _build_post_fee(item_data: dict[str, Any]) -> dict[str, bool]:
-    """转换已由抓包确认的包邮和仅自提发货方式。"""
+def _build_post_fee(item_data: dict[str, Any]) -> dict[str, Any]:
+    """按单品发布表单构造包邮、按距离、一口价、运费模板和无需邮寄配置。"""
     shipping_method = _text(item_data.get("shipping_method")) or "free"
+    only_take_self = as_bool(item_data.get("support_pickup", False))
     if shipping_method == "free":
-        return {"canFreeShipping": True, "supportFreight": True, "onlyTakeSelf": False}
+        return {
+            "canFreeShipping": True,
+            "supportFreight": True,
+            "onlyTakeSelf": only_take_self,
+        }
+    if shipping_method == "distance":
+        return {
+            "canFreeShipping": False,
+            "supportFreight": True,
+            "onlyTakeSelf": only_take_self,
+            "templateId": "-100",
+        }
+    if shipping_method == "fixed":
+        try:
+            postage = float(item_data.get("postage") or 0)
+        except (TypeError, ValueError) as exc:
+            raise DirectPublishError("宝贝运费必须是有效数字") from exc
+        if postage < 0 or postage > 1000:
+            raise DirectPublishError("宝贝运费必须在0到1000元之间")
+        return {
+            "canFreeShipping": False,
+            "supportFreight": True,
+            "onlyTakeSelf": only_take_self,
+            "postPriceInCent": str(round(postage * 100)),
+            "templateId": "0",
+        }
+    if shipping_method == "template":
+        return {
+            "canFreeShipping": False,
+            "supportFreight": True,
+            "onlyTakeSelf": only_take_self,
+            "templateId": "-100",
+        }
     if shipping_method == "none":
-        return {"canFreeShipping": False, "supportFreight": False, "onlyTakeSelf": True}
-    raise DirectPublishError("当前接口抓包未包含非包邮运费载荷，请改为包邮或无需邮寄后发布")
+        return {
+            "canFreeShipping": False,
+            "supportFreight": False,
+            "onlyTakeSelf": only_take_self,
+        }
+    raise DirectPublishError("发货方式无效，请重新选择")
 
 
 def _resolve_post_fee(item_data: dict[str, Any], snapshot: dict[str, Any] | None) -> dict[str, Any]:
@@ -202,6 +227,15 @@ def _resolve_post_fee(item_data: dict[str, Any], snapshot: dict[str, Any] | None
         snapshot_post_fee = snapshot.get("itemPostFeeDTO")
         if snapshot_post_fee_unchanged(item_data, snapshot_post_fee):
             return normalize_snapshot_post_fee(snapshot_post_fee)
+        # 只切换「支持自提」时保留平台原始运费模板、距离计费和金额，
+        # 仅覆盖独立的 onlyTakeSelf 字段，避免重建时丢失真实模板 ID。
+        if (
+            "support_pickup" in item_data
+            and snapshot_post_fee_shipping_unchanged(item_data, snapshot_post_fee)
+        ):
+            preserved = normalize_snapshot_post_fee(snapshot_post_fee)
+            preserved["onlyTakeSelf"] = as_bool(item_data.get("support_pickup"))
+            return preserved
     return _build_post_fee(item_data)
 
 
@@ -300,21 +334,7 @@ async def build_item_payload(
         "leafId": _text(item_data.get("platform_leaf_id")),
         "tbCatId": _text(item_data.get("platform_tb_category_id")),
     }
-    missing_category_fields = [
-        field for field in ("catId", "channelCatId", "tbCatId") if not category_info[field]
-    ]
-    if missing_category_fields:
-        field_names = {
-            "catId": "末级分类ID",
-            "channelCatId": "频道分类ID",
-            "tbCatId": "淘宝分类ID",
-        }
-        raise DirectPublishError(
-            "平台商品分类信息不完整，缺少 "
-            f"{', '.join(field_names[field] for field in missing_category_fields)}，请重新选择分类"
-        )
     resolved_address = await _resolve_address(item_data, snapshot)
-
     video_items: list[dict[str, Any]] = []
     raw_videos = item_data.get("videos")
     if raw_videos is None:
@@ -430,7 +450,7 @@ async def build_item_payload(
         "quantity": "1" if is_multi_spec else _resolve_quantity(item_data),
         "simpleItem": "true",
         "imageInfoDOList": video_items + image_items,
-        "itemTextDTO": {"desc": description, "title": title, "titleDescSeparate": False},
+        "itemTextDTO": _build_item_text_dto(title, description),
         "itemLabelExtList": labels,
         "itemProperties": item_properties,
         "userRightsProtocols": _resolve_user_rights(snapshot),

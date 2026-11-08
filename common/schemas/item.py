@@ -1,6 +1,6 @@
 ﻿from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class ItemTarget(BaseModel):
@@ -121,11 +121,20 @@ class SellerItemEditRequest(BaseModel):
     quantity: int = Field(default=1, ge=0, le=999999)
     address: str | None = Field(default=None, max_length=200)
     address_expected_text: str | None = Field(default=None, max_length=200)
+    delivery_method: str = Field(
+        default="express", pattern="^(express|pickup)$", description="发货方式：express/pickup"
+    )
     shipping_method: str = Field(default="free", pattern="^(free|distance|fixed|template|none)$")
     support_pickup: bool = False
-    postage: float = Field(default=0, ge=0)
+    postage: float = Field(default=0, ge=0, le=1000, description="邮费，0表示包邮")
     brand: str | None = Field(default=None, max_length=100)
     condition: str | None = Field(default=None, max_length=20)
 
     model_config = ConfigDict(extra="ignore")
+
+    @model_validator(mode="after")
+    def normalize_delivery_method(self) -> "SellerItemEditRequest":
+        """以实际运费方式统一兼容字段，避免编辑载荷自相矛盾。"""
+        self.delivery_method = "pickup" if self.shipping_method == "none" else "express"
+        return self
 

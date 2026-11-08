@@ -22,12 +22,15 @@ import { GetSourceCode } from '@/pages/auth/GetSourceCode'
 
 // 页面组件懒加载，按需加载提升首屏速度
 const Dashboard = React.lazy(() => import('@/pages/dashboard/Dashboard').then(m => ({ default: m.Dashboard })))
+const Home = React.lazy(() => import('@/pages/home/Home').then(m => ({ default: m.Home })))
+const OnlineInstall = React.lazy(() => import('@/pages/online-install/OnlineInstall').then(m => ({ default: m.OnlineInstall })))
 const DataOverview = React.lazy(() => import('@/pages/data_analysis/DataOverview').then(m => ({ default: m.DataOverview })))
 const Accounts = React.lazy(() => import('@/pages/accounts/Accounts').then(m => ({ default: m.Accounts })))
 const Items = React.lazy(() => import('@/pages/items/Items').then(m => ({ default: m.Items })))
 const Orders = React.lazy(() => import('@/pages/orders/Orders').then(m => ({ default: m.Orders })))
 const Keywords = React.lazy(() => import('@/pages/keywords/Keywords').then(m => ({ default: m.Keywords })))
 const About = React.lazy(() => import('@/pages/about/About').then(m => ({ default: m.About })))
+const PublicAbout = React.lazy(() => import('@/pages/about/PublicAbout').then(m => ({ default: m.PublicAbout })))
 const Disclaimer = React.lazy(() => import('@/pages/disclaimer/Disclaimer').then(m => ({ default: m.Disclaimer })))
 const NotificationChannels = React.lazy(() => import('@/pages/notifications/NotificationChannels').then(m => ({ default: m.NotificationChannels })))
 const MessageNotifications = React.lazy(() => import('@/pages/notifications/MessageNotifications').then(m => ({ default: m.MessageNotifications })))
@@ -58,10 +61,14 @@ const CardPickup = React.lazy(() => import('@/pages/distribution/CardPickup').th
 const SharedScanManager = React.lazy(() => import('@/pages/shared-scan/SharedScanManager').then(m => ({ default: m.SharedScanManager })))
 const SharedScanPage = React.lazy(() => import('@/pages/shared-scan/SharedScanPage').then(m => ({ default: m.SharedScanPage })))
 
+// 同意后发货 - 买家提货页（无需登录，公开访问）
+const AgreePickupPage = React.lazy(() => import('@/pages/agree-pickup/AgreePickupPage').then(m => ({ default: m.AgreePickupPage })))
+
 // 商品发布页面懒加载
 const ProductMaterials = React.lazy(() => import('@/pages/product-publish/ProductMaterials').then(m => ({ default: m.ProductMaterials })))
 const ProductPublish = React.lazy(() => import('@/pages/product-publish/ProductPublish').then(m => ({ default: m.ProductPublish })))
 const BatchPublish = React.lazy(() => import('@/pages/product-publish/BatchPublish').then(m => ({ default: m.BatchPublish })))
+const ScheduledPublishRules = React.lazy(() => import('@/pages/product-publish/ScheduledPublishRules').then(m => ({ default: m.ScheduledPublishRules })))
 const PublishAddresses = React.lazy(() => import('@/pages/product-publish/PublishAddresses').then(m => ({ default: m.PublishAddresses })))
 const PublishLogs = React.lazy(() => import('@/pages/product-publish/PublishLogs').then(m => ({ default: m.PublishLogs })))
 const ListingMonitor = React.lazy(() => import('@/pages/product-monitor/ListingMonitor').then(m => ({ default: m.ListingMonitor })))
@@ -79,6 +86,8 @@ const AutoReplyLogs = React.lazy(() => import('@/pages/autoReplyLogs/AutoReplyLo
 const RiskLogs = React.lazy(() => import('@/pages/admin/RiskLogs').then(m => ({ default: m.RiskLogs })))
 const ManualCaptcha = React.lazy(() => import('@/pages/admin/ManualCaptcha').then(m => ({ default: m.ManualCaptcha })))
 const AccountLoginLogs = React.lazy(() => import('@/pages/admin/AccountLoginLogs').then(m => ({ default: m.AccountLoginLogs })))
+const UserLoginLogs = React.lazy(() => import('@/pages/admin/UserLoginLogs').then(m => ({ default: m.UserLoginLogs })))
+const EmailLogs = React.lazy(() => import('@/pages/admin/EmailLogs').then(m => ({ default: m.EmailLogs })))
 const DbBackupLogs = React.lazy(() => import('@/pages/admin/DbBackupLogs').then(m => ({ default: m.DbBackupLogs })))
 const DataManagement = React.lazy(() => import('@/pages/admin/DataManagement').then(m => ({ default: m.DataManagement })))
 const ScheduledTasks = React.lazy(() => import('@/pages/admin/ScheduledTasks').then(m => ({ default: m.ScheduledTasks })))
@@ -314,6 +323,8 @@ function App() {
       <Suspense fallback={<PageLoading />}>
         <Routes>
           {/* Public routes */}
+          <Route path="/" element={<Home />} />
+          <Route path="/online-install" element={<OnlineInstall />} />
           <Route path="/login" element={<Login />} />
           <Route path="/register" element={<Register />} />
           <Route path="/forgot-password" element={<ForgotPassword />} />
@@ -321,19 +332,20 @@ function App() {
           <Route path="/renew-activation" element={<RenewActivation />} />
           <Route path="/get-local-version" element={<GetLocalVersion />} />
           <Route path="/get-source-code" element={<GetSourceCode />} />
+          <Route path="/about-public" element={<PublicAbout />} />
           {/* 兼职端扫码页面：无需登录，公开访问 */}
           <Route path="/shared-scan-page" element={<SharedScanPage />} />
+          {/* 同意后发货提货页：无需登录，公开访问 */}
+          <Route path="/agree-pickup" element={<AgreePickupPage />} />
 
           {/* Protected routes */}
           <Route
-            path="/"
             element={
               <ProtectedRoute>
                 <MainLayout />
               </ProtectedRoute>
             }
           >
-            <Route index element={<Navigate to="/dashboard" replace />} />
             <Route path="dashboard" element={<Dashboard />} />
             <Route path="data-analysis/overview" element={<DataOverview />} />
             <Route path="accounts" element={<Accounts />} />
@@ -367,6 +379,7 @@ function App() {
             <Route path="product-publish/materials" element={<ProductMaterials />} />
             <Route path="product-publish/single" element={<ProductPublish />} />
             <Route path="product-publish/batch" element={<BatchPublish />} />
+            <Route path="product-publish/scheduled" element={<ScheduledPublishRules />} />
             <Route path="product-publish/addresses" element={<PublishAddresses />} />
             <Route path="product-publish/logs" element={<PublishLogs />} />
             {/* 商品监控 */}
@@ -390,6 +403,8 @@ function App() {
             <Route path="admin/users" element={<Users />} />
             <Route path="admin/logs" element={<Logs />} />
             <Route path="admin/account-login-logs" element={<AccountLoginLogs />} />
+            <Route path="admin/user-login-logs" element={<UserLoginLogs />} />
+            <Route path="admin/email-logs" element={<EmailLogs />} />
             <Route path="admin/db-backup-logs" element={<DbBackupLogs />} />
             <Route path="admin/auto-reply-logs" element={<Navigate to="/message-logs" replace />} />
             <Route path="admin/risk-logs" element={<Navigate to="/risk-logs" replace />} />

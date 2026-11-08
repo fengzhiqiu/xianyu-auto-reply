@@ -15,6 +15,12 @@ from typing import List
 from pydantic import Field, computed_field
 
 from common.core.config import BaseConfig
+from common.utils.service_restart import detect_runtime
+
+
+def _default_frontend_service_url() -> str:
+    """自动选择 Docker 服务名或本机前端地址，允许环境变量覆盖。"""
+    return "http://frontend:80" if detect_runtime() == "docker" else "http://127.0.0.1:9000"
 
 
 class BackendWebConfig(BaseConfig):
@@ -33,25 +39,33 @@ class BackendWebConfig(BaseConfig):
     version: str = Field(default="0.1.0")
     api_v1_prefix: str = Field(default="/api/v1")
     service_port: int = Field(default=8089, alias="BACKEND_WEB_PORT")
+
+    # 在线安装的连接、执行时限及共享任务日志保留时间（秒）。
+    online_install_connect_timeout: int = Field(default=60, ge=1, le=60)
+    online_install_timeout: int = Field(default=7200, ge=60, le=7200)
+    online_install_retention_seconds: int = Field(default=86400, ge=7200)
     
     # JWT配置
     # 注意：jwt_secret_key 由数据库统一托管（启动时 ensure_jwt_secret_key 自动生成/加载并写回此实例），
     # 此处 default 仅作占位，运行期会被数据库中的值覆盖。
     jwt_secret_key: str = Field(default="change-me", repr=False)
     jwt_algorithm: str = Field(default="HS256")
-    access_token_expire_minutes: int = Field(default=30)
+    access_token_expire_minutes: int = Field(default=1440)
     refresh_token_expire_minutes: int = Field(default=60 * 24 * 7)
     
     # CORS配置
     cors_origins_raw: str = Field(default="*", alias="CORS_ORIGINS")
     
     # 服务间通信URL
+    frontend_service_url: str = Field(
+        default_factory=_default_frontend_service_url, alias="FRONTEND_SERVICE_URL",
+    )
     websocket_service_url: str = Field(
-        default="http://localhost:8090",
+        default="http://127.0.0.1:8090",
         alias="WEBSOCKET_SERVICE_URL"
     )
     scheduler_service_url: str = Field(
-        default="http://localhost:8091",
+        default="http://127.0.0.1:8091",
         alias="SCHEDULER_SERVICE_URL"
     )
     
@@ -65,7 +79,7 @@ class BackendWebConfig(BaseConfig):
 
     # Backend-Web服务的公网访问地址（用于生成文件URL）
     backend_web_public_url: str = Field(
-        default="http://localhost:8089",
+        default="http://127.0.0.1:8089",
         alias="BACKEND_WEB_PUBLIC_URL"
     )
 

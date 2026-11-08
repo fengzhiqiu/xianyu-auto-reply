@@ -19,7 +19,7 @@ from common.models.xy_account import XYAccount
 
 REMOTE_TOKEN_EVENT_TYPE = "remote_token"
 
-# 远程回退场景下，风控日志事件描述使用的远程接口结果文案
+# 远程 Token 调用场景下，风控日志事件描述使用的远程接口结果文案
 REMOTE_OUTCOME_SUCCESS = "远程接口获取Token成功"
 REMOTE_OUTCOME_FAILED = "远程接口获取Token失败"
 
@@ -48,6 +48,26 @@ def build_remote_fallback_event_description(
     return f"{scene_text}本地网页Token接口返回：{reason}；{outcome}"
 
 
+def build_remote_direct_event_description(
+    *,
+    remote_outcome: str,
+    scene: str = "",
+    configuration_source: str = "系统设置",
+) -> str:
+    """构造远程调用说明，记录配置来源，避免个人配置被误记为系统配置。
+
+    Args:
+        remote_outcome: 远程接口调用结果说明。
+        scene: 调用场景中文前缀。
+        configuration_source: 本次已选定的配置来源。
+    Returns:
+        包含配置来源及结果的风控事件描述。
+    """
+    scene_text = str(scene or "").strip()
+    outcome = str(remote_outcome or "").strip() or "远程接口结果未知"
+    return f"{scene_text}按{configuration_source}直接调用远程Token接口；{outcome}"
+
+
 def build_remote_token_log_result(
     *,
     success: bool,
@@ -59,8 +79,7 @@ def build_remote_token_log_result(
 ) -> str:
     """构造远程 Token 获取结果文案。
 
-    取 Token 是「先本地网页接口、失败后再远程接口」两段串行流程，耗时分开记录，
-    便于排查究竟是本地慢还是远程慢；两段都有时额外给出总耗时。
+    远程模式直接调用远程接口，本地耗时字段保持为 0；该字段保留用于兼容历史日志格式。
 
     Args:
         success: 远程接口业务是否成功。
@@ -68,7 +87,7 @@ def build_remote_token_log_result(
         api_mode: 远程接口返回的实际 Token 接口。
         status_code: HTTP 状态码。
         duration_seconds: 远程接口耗时。
-        local_duration_seconds: 本地网页接口耗时（含令牌过期重试）。
+        local_duration_seconds: 历史兼容字段，当前直接远程调用时为 0。
     Returns:
         用于风控日志 processing_result 的中文结果文案。
     """
