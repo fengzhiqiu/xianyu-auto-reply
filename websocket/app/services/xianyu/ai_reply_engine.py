@@ -18,7 +18,6 @@ import time
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 
-import httpx
 from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -32,9 +31,11 @@ from common.services.ai_provider_service import (
     build_anthropic_url,
     build_gemini_url,
     clean_ai_text,
+    create_ai_http_client,
     get_ai_settings_missing_fields,
     get_ai_provider_name,
     normalize_ai_provider_type,
+    normalize_ai_proxy_url,
     normalize_openai_base_url,
     read_ai_enabled,
 )
@@ -464,61 +465,62 @@ class AIReplyEngine:
     ) -> str:
         """调用OpenAI兼容API"""
         try:
-            from openai import AsyncOpenAI
+            from openai import AsyncOpenAI, DefaultAsyncHttpxClient
             
-            client = AsyncOpenAI(
+            proxy_url = normalize_ai_proxy_url(settings.get("proxy_url"))
+            async with AsyncOpenAI(
                 api_key=settings["api_key"],
                 base_url=normalize_openai_base_url(settings["base_url"]),
-            )
-            
-            request_messages = self._build_openai_messages(messages)
-            response = await self._create_openai_completion_with_fallbacks(
-                client=client,
-                settings=settings,
-                messages=request_messages,
-                max_tokens=max_tokens,
-                temperature=temperature,
-            )
-
-            choice = response.choices[0]
-            message = choice.message
-            reply_text = self._normalize_text(message.content)
-            if not reply_text:
-                message_keys = []
-                try:
-                    message_data = message.model_dump()
-                    message_keys = [key for key, val in message_data.items() if val]
-                except Exception:
-                    message_keys = []
-                logger.warning(
-                    f"OpenAI API返回空内容: finish_reason={getattr(choice, 'finish_reason', None)}, message字段={message_keys}"
+                http_client=DefaultAsyncHttpxClient(proxy=proxy_url) if proxy_url else None,
+            ) as client:
+                request_messages = self._build_openai_messages(messages)
+                response = await self._create_openai_completion_with_fallbacks(
+                    client=client,
+                    settings=settings,
+                    messages=request_messages,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
                 )
-                if getattr(choice, "finish_reason", None) == "length":
-                    retry_max_tokens = max(max_tokens * 2, 1024)
+
+                choice = response.choices[0]
+                message = choice.message
+                reply_text = self._normalize_text(message.content)
+                if not reply_text:
+                    message_keys = []
+                    try:
+                        message_data = message.model_dump()
+                        message_keys = [key for key, val in message_data.items() if val]
+                    except Exception:
+                        message_keys = []
                     logger.warning(
-                        f"OpenAI API输出被截断，使用 max_tokens={retry_max_tokens} 重试一次"
+                        f"OpenAI API返回空内容: finish_reason={getattr(choice, 'finish_reason', None)}, message字段={message_keys}"
                     )
-                    retry_response = await self._create_openai_completion_with_fallbacks(
-                        client=client,
-                        settings=settings,
-                        messages=request_messages,
-                        max_tokens=retry_max_tokens,
-                        temperature=temperature,
-                    )
-                    retry_choice = retry_response.choices[0]
-                    retry_message = retry_choice.message
-                    reply_text = self._normalize_text(retry_message.content)
-                    if not reply_text:
-                        retry_keys = []
-                        try:
-                            retry_data = retry_message.model_dump()
-                            retry_keys = [key for key, val in retry_data.items() if val]
-                        except Exception:
-                            retry_keys = []
+                    if getattr(choice, "finish_reason", None) == "length":
+                        retry_max_tokens = max(max_tokens * 2, 1024)
                         logger.warning(
-                            f"OpenAI API重试后仍返回空内容: finish_reason={getattr(retry_choice, 'finish_reason', None)}, message字段={retry_keys}"
+                            f"OpenAI API输出被截断，使用 max_tokens={retry_max_tokens} 重试一次"
                         )
-            return reply_text
+                        retry_response = await self._create_openai_completion_with_fallbacks(
+                            client=client,
+                            settings=settings,
+                            messages=request_messages,
+                            max_tokens=retry_max_tokens,
+                            temperature=temperature,
+                        )
+                        retry_choice = retry_response.choices[0]
+                        retry_message = retry_choice.message
+                        reply_text = self._normalize_text(retry_message.content)
+                        if not reply_text:
+                            retry_keys = []
+                            try:
+                                retry_data = retry_message.model_dump()
+                                retry_keys = [key for key, val in retry_data.items() if val]
+                            except Exception:
+                                retry_keys = []
+                            logger.warning(
+                                f"OpenAI API重试后仍返回空内容: finish_reason={getattr(retry_choice, 'finish_reason', None)}, message字段={retry_keys}"
+                            )
+                return reply_text
             
         except Exception as e:
             logger.error(f"OpenAI API调用失败: {e}")
@@ -566,7 +568,7 @@ class AIReplyEngine:
                 "Content-Type": "application/json",
             }
             
-            async with httpx.AsyncClient(timeout=30) as client:
+            async with create_ai_http_client(settings.get("proxy_url")) as client:
                 response = await client.post(url, headers=headers, json=data)
                 response.raise_for_status()
                 result = response.json()
@@ -632,7 +634,7 @@ class AIReplyEngine:
             
             headers = {"Content-Type": "application/json"}
             
-            async with httpx.AsyncClient(timeout=30) as client:
+            async with create_ai_http_client(settings.get("proxy_url")) as client:
                 response = await client.post(url, headers=headers, params={"key": api_key}, json=payload)
                 response.raise_for_status()
                 result = response.json()
@@ -687,7 +689,7 @@ class AIReplyEngine:
                 "Content-Type": "application/json",
             }
             
-            async with httpx.AsyncClient(timeout=30) as client:
+            async with create_ai_http_client(settings.get("proxy_url")) as client:
                 response = await client.post(url, headers=headers, json=payload)
                 response.raise_for_status()
                 result = response.json()

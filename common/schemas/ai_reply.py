@@ -11,6 +11,7 @@ class AIReplySettings(BaseModel):
     model_name: str = "qwen-plus"
     api_key: str = ""
     base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    proxy_url: str = ""
     max_discount_percent: int = 10
     max_discount_amount: int = 100
     max_bargain_rounds: int = 3
@@ -29,6 +30,7 @@ class AIReplySettingsUpdate(BaseModel):
     model_name: str | None = None
     api_key: str | None = None
     base_url: str | None = None
+    proxy_url: str | None = None
     max_discount_percent: int | None = None
     max_discount_amount: int | None = None
     max_bargain_rounds: int | None = None
@@ -45,4 +47,5 @@ class AIReplySettingsUpdate(BaseModel):
 class AIModelListRequest(BaseModel):
     provider_type: str = "openai_compatible"
     base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    proxy_url: str = ""
     api_key: str = ""

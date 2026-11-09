@@ -198,6 +198,8 @@ export function Accounts() {
   const [aiProviderType, setAiProviderType] = useState<AIProviderType>('openai_compatible')
   const [aiApiUrl, setAiApiUrl] = useState('')
   const [aiApiKey, setAiApiKey] = useState('')
+  const [aiProxyUrl, setAiProxyUrl] = useState('')
+  const [showAiProxyUrl, setShowAiProxyUrl] = useState(false)
   const [aiModelName, setAiModelName] = useState('')
   const [aiMaxDiscountPercent, setAiMaxDiscountPercent] = useState(10)
   const [aiMaxDiscountAmount, setAiMaxDiscountAmount] = useState(100)
@@ -1431,6 +1433,8 @@ export function Accounts() {
     setAiSettingsAccount(account)
     setActiveModal('ai-settings')
     setAiSettingsLoading(true)
+    setAiProxyUrl('')
+    setShowAiProxyUrl(false)
     setAiModelOptions([])
     try {
       const settings = await getAIReplySettings(account.id)
@@ -1439,6 +1443,7 @@ export function Accounts() {
       setAiEnabled(settings.ai_enabled ?? settings.enabled ?? false)
       setAiApiUrl(settings.base_url ?? AI_PROVIDER_DEFAULT_BASE_URLS[providerType])
       setAiApiKey(settings.api_key ?? '')
+      setAiProxyUrl(settings.proxy_url ?? '')
       setAiModelName(settings.model_name ?? 'qwen-plus')
       setAiMaxDiscountPercent(settings.max_discount_percent ?? 10)
       setAiMaxDiscountAmount(settings.max_discount_amount ?? 100)
@@ -1508,6 +1513,7 @@ export function Accounts() {
         provider_type: aiProviderType,
         base_url: aiApiUrl || AI_PROVIDER_DEFAULT_BASE_URLS[aiProviderType],
         api_key: aiApiKey,
+        proxy_url: aiProxyUrl.trim(),
       })
       const models = result.data?.models ?? []
       // 不论成功失败，都按返回结果设置（失败时为空数组，前端自动回退为普通文本框输入）
@@ -1552,6 +1558,7 @@ export function Accounts() {
         provider_type: aiProviderType,
         base_url: aiApiUrl,
         api_key: aiApiKey,
+        proxy_url: aiProxyUrl.trim(),
         model_name: aiModelName,
         max_discount_percent: aiMaxDiscountPercent,
         max_discount_amount: aiMaxDiscountAmount,
@@ -1597,6 +1604,7 @@ export function Accounts() {
         provider_type: aiProviderType,
         base_url: aiApiUrl,
         api_key: aiApiKey,
+        proxy_url: aiProxyUrl.trim(),
         model_name: aiModelName,
         max_discount_percent: aiMaxDiscountPercent,
         max_discount_amount: aiMaxDiscountAmount,
@@ -3745,6 +3753,34 @@ export function Accounts() {
                             {showAiApiKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                           </button>
                         </div>
+                      </div>
+                      <div className="input-group">
+                        <label htmlFor="ai-reply-proxy-url" className="input-label">网络代理（可选）</label>
+                        <div className="relative">
+                          <input
+                            id="ai-reply-proxy-url"
+                            type={showAiProxyUrl ? 'text' : 'password'}
+                            value={aiProxyUrl}
+                            onChange={(e) => setAiProxyUrl(e.target.value)}
+                            className="input-ios pr-9"
+                            placeholder="http://192.168.1.10:7890"
+                            autoComplete="off"
+                            spellCheck={false}
+                            maxLength={2048}
+                            aria-describedby="ai-reply-proxy-help"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => setShowAiProxyUrl(v => !v)}
+                            className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-slate-600 dark:hover:text-slate-300"
+                            aria-label={showAiProxyUrl ? '隐藏代理地址' : '显示代理地址'}
+                          >
+                            {showAiProxyUrl ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                          </button>
+                        </div>
+                        <p id="ai-reply-proxy-help" className="text-xs text-slate-400 mt-1">
+                          仅用于此账号的 AI 模型列表、连接测试和自动回复。支持 HTTP、HTTPS 和 SOCKS5，留空沿用默认网络。
+                        </p>
                       </div>
                       <div className="input-group">
                         {/* 注意：label 不能包裹 button，否则点击 label 任意位置都会触发内部 button 的 click 事件。改用 div 容器隔离 */}
