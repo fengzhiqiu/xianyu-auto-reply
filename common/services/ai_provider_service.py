@@ -9,6 +9,7 @@ AI服务商工具
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 from loguru import logger
@@ -40,6 +41,35 @@ AI_PROVIDER_DEFAULT_BASE_URLS = {
 def clean_ai_text(value: Any) -> str:
     """清理AI配置文本中的危险换行和首尾空白"""
     return str(value or "").replace("\r", "").replace("\n", "").strip()
+
+
+def normalize_ai_proxy_url(value: str | None) -> str:
+    """校验 AI 出站代理地址，不在报错中回显代理凭据。"""
+    proxy_url = (value or "").strip()
+    if not proxy_url:
+        return ""
+    try:
+        parsed = urlsplit(proxy_url)
+        if (
+            len(proxy_url) > 2048
+            or any(char.isspace() or ord(char) < 32 for char in proxy_url)
+            or parsed.scheme not in {"http", "https", "socks5"}
+            or not parsed.hostname
+            or parsed.port == 0
+            or parsed.path not in {"", "/"}
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError
+        httpx.Proxy(proxy_url)
+    except (ValueError, httpx.InvalidURL):
+        raise ValueError("请输入有效的 HTTP、HTTPS 或 SOCKS5 代理地址，例如 http://192.168.1.10:7890") from None
+    return proxy_url
+
+
+def create_ai_http_client(proxy_url: str | None = None) -> httpx.AsyncClient:
+    """仅为这次 AI 请求使用指定代理。"""
+    return httpx.AsyncClient(timeout=30.0, proxy=normalize_ai_proxy_url(proxy_url) or None)
 
 
 def normalize_ai_provider_type(
@@ -261,7 +291,9 @@ def normalize_model_options(models: list[dict[str, Any]]) -> list[dict[str, str]
     return options
 
 
-async def fetch_ai_model_list(provider_type: Any, base_url: Any, api_key: Any) -> list[dict[str, str]]:
+async def fetch_ai_model_list(
+    provider_type: Any, base_url: Any, api_key: Any, *, proxy_url: str | None = None,
+) -> list[dict[str, str]]:
     """按服务商协议获取模型列表"""
     settings = normalize_ai_settings({"provider_type": provider_type, "base_url": base_url, "api_key": api_key})
     provider = settings["provider_type"]
@@ -272,7 +304,7 @@ async def fetch_ai_model_list(provider_type: Any, base_url: Any, api_key: Any) -
     if provider == "dashscope_app":
         raise ValueError("DashScope应用API不支持自动获取模型列表，请手动填写模型名称")
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with create_ai_http_client(proxy_url) as client:
         if provider == "anthropic":
             url = build_anthropic_url(settings["base_url"], "/models")
             response = await client.get(
@@ -321,6 +353,8 @@ async def test_ai_connection(
     base_url: Any,
     api_key: Any,
     model_name: Any,
+    *,
+    proxy_url: str | None = None,
 ) -> str:
     """按服务商协议测试AI连接"""
     raw_settings = {
@@ -347,7 +381,7 @@ async def test_ai_connection(
         {"role": "user", "content": "你好，请回复'测试成功'"},
     ]
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with create_ai_http_client(proxy_url) as client:
         if provider == "anthropic":
             url = build_anthropic_url(settings["base_url"], "/messages")
             system_content = ""

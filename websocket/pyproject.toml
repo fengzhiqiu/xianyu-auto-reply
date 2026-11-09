@@ -22,7 +22,7 @@ dependencies = [
     "websockets==12.0",
     "python-socks[asyncio]>=2.0.0",
     "loguru>=0.7.2",
-    "httpx>=0.25.0",
+    "httpx[socks]>=0.26.0",
     "Pillow>=10.0.0",
     "redis==6.2.0",
     "anyio>=4.0.0",
@@ -36,7 +36,7 @@ dependencies = [
     "python-jose[cryptography]==3.3.0",
     "passlib[bcrypt]==1.7.4",
     "bcrypt==5.0.0",
-    "openai>=1.0.0",
+    "openai>=1.55.3",
     # 真实鼠标滑块引擎（可选，仅 Windows 有桌面环境使用；通过系统设置启用）。
     # 用环境标记限定仅 Windows 安装，避免 Linux/Docker 构建引入无效依赖。
     "pyautogui>=0.9.54; sys_platform == 'win32'",

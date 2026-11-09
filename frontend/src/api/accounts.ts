@@ -476,6 +476,7 @@ export interface AIReplySettings {
   model_name?: string
   api_key?: string
   base_url?: string
+  proxy_url?: string
   max_discount_percent?: number
   max_discount_amount?: number
   max_bargain_rounds?: number
@@ -514,6 +515,7 @@ export const updateAIReplySettings = (cookieId: string, settings: Partial<AIRepl
   if (settings.model_name !== undefined) payload.model_name = settings.model_name
   if (settings.api_key !== undefined) payload.api_key = settings.api_key
   if (settings.base_url !== undefined) payload.base_url = settings.base_url
+  if (settings.proxy_url !== undefined) payload.proxy_url = settings.proxy_url
   if (settings.max_discount_percent !== undefined) payload.max_discount_percent = settings.max_discount_percent
   if (settings.max_discount_amount !== undefined) payload.max_discount_amount = settings.max_discount_amount
   if (settings.max_bargain_rounds !== undefined) payload.max_bargain_rounds = settings.max_bargain_rounds
@@ -544,6 +546,7 @@ export const fetchAIModels = (params: {
   provider_type: AIProviderType
   base_url: string
   api_key: string
+  proxy_url?: string
 }): Promise<AIModelListResponse> => {
   return post(`${AI_SETTINGS_PREFIX}/models`, params)
 }

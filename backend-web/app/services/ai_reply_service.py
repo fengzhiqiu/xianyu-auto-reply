@@ -17,6 +17,7 @@ from common.services.ai_provider_service import (
     clean_ai_text,
     get_ai_settings_missing_fields,
     normalize_ai_provider_type,
+    normalize_ai_proxy_url,
     read_ai_enabled,
 )
 from common.models.xy_account import XYAccount
@@ -27,6 +28,7 @@ DEFAULT_AI_SETTINGS = {
     "model_name": "qwen-plus",
     "api_key": "",
     "base_url": DEFAULT_AI_BASE_URL,
+    "proxy_url": "",
     "max_discount_percent": 10,
     "max_discount_amount": 100,
     "max_bargain_rounds": 3,
@@ -96,6 +98,8 @@ class AIReplySettingsService:
             merged["api_key"] = clean_ai_text(payload.get("api_key"))
         if "base_url" in payload:
             merged["base_url"] = clean_ai_text(payload.get("base_url"))
+        if "proxy_url" in payload:
+            merged["proxy_url"] = normalize_ai_proxy_url(payload["proxy_url"])
         if "max_discount_percent" in payload:
             merged["max_discount_percent"] = int(payload.get("max_discount_percent", 10) or 0)
         if "max_discount_amount" in payload:

@@ -37,6 +37,7 @@ async def fetch_ai_reply_models(
             payload.provider_type,
             payload.base_url,
             payload.api_key,
+            proxy_url=payload.proxy_url,
         )
         if not models:
             return ApiResponse(
@@ -146,7 +147,9 @@ async def test_ai_reply_settings(
     model_name = settings.get("model_name", "qwen-plus")
     
     try:
-        reply = await test_ai_connection(provider_type, base_url, api_key, model_name)
+        reply = await test_ai_connection(
+            provider_type, base_url, api_key, model_name, proxy_url=settings.get("proxy_url")
+        )
         return ApiResponse(success=True, message=f"AI连接测试成功！模型回复: {reply[:100]}")
     except (TimeoutError, httpx.TimeoutException):
         return ApiResponse(success=False, message="AI连接超时，请检查网络或API地址")
