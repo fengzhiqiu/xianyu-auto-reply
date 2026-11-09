@@ -72,6 +72,39 @@ def create_ai_http_client(proxy_url: str | None = None) -> httpx.AsyncClient:
     return httpx.AsyncClient(timeout=30.0, proxy=normalize_ai_proxy_url(proxy_url) or None)
 
 
+def adapt_openai_completion_params(params: dict[str, Any], error: Any) -> bool:
+    """仅在服务商明确拒绝旧参数时调整请求，兼容仍使用旧参数的接口。"""
+    if isinstance(error, dict):
+        error = error.get("error", error)
+    if isinstance(error, dict):
+        param = error.get("param")
+        code = error.get("code")
+        message = clean_ai_text(error.get("message")).lower()
+    else:
+        param = code = None
+        message = clean_ai_text(error).lower()
+
+    unsupported = (
+        code in ("unsupported_parameter", "unsupported_value")
+        or "unsupported" in message
+        or "not supported" in message
+    )
+    if not unsupported:
+        return False
+    if "max_tokens" in params and (
+        (param == "max_tokens" and code == "unsupported_parameter")
+        or ("max_tokens" in message and "max_completion_tokens" in message)
+    ):
+        params["max_completion_tokens"] = params.pop("max_tokens")
+        return True
+    if "temperature" in params and (
+        param == "temperature" or "'temperature'" in message or '"temperature"' in message
+    ):
+        params.pop("temperature")
+        return True
+    return False
+
+
 def normalize_ai_provider_type(
     provider_type: Any = None,
     base_url: Any = "",
@@ -488,41 +521,42 @@ async def test_ai_connection(
                 raise RuntimeError(f"DashScope应用响应格式错误: {str(result)[:500]}") from exc
 
         url = build_openai_url(settings["base_url"], "/chat/completions")
-        # 优先使用字符串 content（兼容性最广），失败后回退到数组形式（兼容omni等多模态模型）
         headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
-        response = await client.post(
-            url,
-            headers=headers,
-            json={
-                "model": model,
-                "messages": messages,
-                "max_tokens": max_tokens,
-                "temperature": temperature,
-            },
-        )
-        if response.status_code == 400:
-            # 多模态/全模态模型可能要求 content 为数组格式，回退重试
+        payload = {
+            "model": model,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+        }
+        using_text_parts = False
+        while True:
+            response = await client.post(url, headers=headers, json=payload)
+            if response.status_code != 400:
+                break
+            try:
+                error = response.json()
+            except ValueError:
+                error = response.text
+            if adapt_openai_completion_params(payload, error):
+                if "max_completion_tokens" in payload:
+                    # 推理模型的额度也包含不可见的推理 token。
+                    payload["max_completion_tokens"] = 1024
+                continue
+            if using_text_parts:
+                break
+            using_text_parts = True
             logger.info(f"【AI接口】OpenAI兼容 字符串content被拒绝，尝试数组content格式 model={model}")
-            converted_messages = []
-            for msg in messages:
-                content = msg.get("content")
-                if isinstance(content, str):
-                    converted_messages.append({**msg, "content": [{"type": "text", "text": content}]})
-                else:
-                    converted_messages.append(msg)
-            response = await client.post(
-                url,
-                headers=headers,
-                json={
-                    "model": model,
-                    "messages": converted_messages,
-                    "max_tokens": max_tokens,
-                    "temperature": temperature,
-                },
-            )
+            payload["messages"] = [
+                {**msg, "content": [{"type": "text", "text": msg["content"]}]}
+                if isinstance(msg.get("content"), str) else msg
+                for msg in messages
+            ]
         ensure_success_response(response, get_ai_provider_name(provider, settings["base_url"], model))
         result = response.json()
         try:
-            return clean_ai_text(result["choices"][0]["message"]["content"])
-        except Exception as exc:
+            reply = clean_ai_text(result["choices"][0]["message"]["content"])
+        except (KeyError, IndexError, TypeError) as exc:
             raise RuntimeError(f"OpenAI兼容响应格式错误: {str(result)[:500]}") from exc
+        if not reply:
+            raise RuntimeError("模型未返回可见文本，请检查模型配置后重试")
+        return reply
