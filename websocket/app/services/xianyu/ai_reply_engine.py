@@ -28,6 +28,7 @@ from common.models.ai_chat_message import AIChatMessage
 from app.services.xianyu.resource_manager import pause_manager
 from common.services.ai_provider_service import (
     DEFAULT_AI_BASE_URL,
+    adapt_openai_completion_params,
     build_anthropic_url,
     build_gemini_url,
     clean_ai_text,
@@ -182,25 +183,6 @@ class AIReplyEngine:
                 converted_messages.append(msg)
         return converted_messages
 
-    async def _create_openai_completion(
-        self,
-        client: Any,
-        settings: Dict,
-        messages: List[Dict],
-        max_tokens: int,
-        temperature: float,
-        disable_thinking: bool,
-    ) -> Any:
-        kwargs: Dict[str, Any] = {
-            "model": settings["model_name"],
-            "messages": messages,
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-        }
-        if disable_thinking:
-            kwargs["extra_body"] = {"enable_thinking": False}
-        return await client.chat.completions.create(**kwargs)
-
     async def _create_openai_completion_with_fallbacks(
         self,
         client: Any,
@@ -218,20 +200,23 @@ class AIReplyEngine:
             ("数组content+禁用思考", text_part_messages, True),
             ("数组content", text_part_messages, False),
         ]
+        params: Dict[str, Any] = {
+            "model": settings["model_name"],
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+        }
         last_error: Optional[BadRequestError] = None
         for label, attempt_messages, disable_thinking in attempts:
-            try:
-                return await self._create_openai_completion(
-                    client=client,
-                    settings=settings,
-                    messages=attempt_messages,
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                    disable_thinking=disable_thinking,
-                )
-            except BadRequestError as exc:
-                last_error = exc
-                logger.info(f"OpenAI API请求方式被拒绝，尝试下一种方式: {label}, model={settings.get('model_name')}: {exc}")
+            extra = {"extra_body": {"enable_thinking": False}} if disable_thinking else {}
+            while True:
+                try:
+                    return await client.chat.completions.create(messages=attempt_messages, **params, **extra)
+                except BadRequestError as exc:
+                    if adapt_openai_completion_params(params, exc.body or str(exc)):
+                        continue
+                    last_error = exc
+                    logger.info(f"OpenAI API请求方式被拒绝，尝试下一种方式: {label}, model={settings.get('model_name')}: {exc}")
+                    break
         if last_error:
             raise last_error
         raise RuntimeError("OpenAI API请求失败")
